@@ -88,7 +88,7 @@ export default function Home() {
                 <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-[#B5B5B5]"><svg viewBox="0 0 24 24" fill="none" className="h-4 w-4 stroke-2"><circle cx="11" cy="11" r="6.5" stroke="currentColor" /><path d="M16 16L20 20" stroke="currentColor" strokeLinecap="round" /></svg></span>
               </div>
               <button className="h-8 rounded-md bg-[#d51a21] px-3 text-[12px] font-medium text-white transition hover:bg-[#bd171d]">+ Создать заявку</button>
-              <button className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#E4E5E7] text-[#8C8C8C]"><svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4"><circle cx="12" cy="5" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="12" cy="19" r="1.6" /></svg></button>
+              <button aria-label="Открыть меню действий" className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#E4E5E7] text-[#8C8C8C]"><svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4"><circle cx="12" cy="5" r="1.6" /><circle cx="12" cy="12" r="1.6" /><circle cx="12" cy="19" r="1.6" /></svg></button>
             </div>
           </header>
 
@@ -177,13 +177,13 @@ export default function Home() {
               </div>
               <div className="pointer-events-none absolute left-1/2 -translate-x-1/2">
                 <div className="pointer-events-auto flex items-center justify-center gap-2">
-                <button className="rounded-md border border-[#E4E5E7] px-2 py-1 text-[11px] text-[#7D7D7D] transition hover:bg-[#FAFAFA]">&lt;&lt;</button>
-                <button className="rounded-md border border-[#E4E5E7] px-2 py-1 text-[11px] text-[#7D7D7D] transition hover:bg-[#FAFAFA]">&lt;</button>
+                <button aria-label="Первая страница" className="rounded-md border border-[#E4E5E7] px-2 py-1 text-[11px] text-[#7D7D7D] transition hover:bg-[#FAFAFA]">&lt;&lt;</button>
+                <button aria-label="Предыдущая страница" className="rounded-md border border-[#E4E5E7] px-2 py-1 text-[11px] text-[#7D7D7D] transition hover:bg-[#FAFAFA]">&lt;</button>
                 <button className="rounded-md px-2 py-1 text-[11px] text-[#7D7D7D]">1</button>
                 <button className="rounded-md bg-[#d51a21]/10 px-2 py-1 text-[11px] text-[#d51a21]">2</button>
                 <button className="rounded-md px-2 py-1 text-[11px] text-[#7D7D7D]">3</button>
                 <span className="text-[11px] text-[#7D7D7D]">... 100</span>
-                <button className="rounded-md border border-[#E4E5E7] px-2 py-1 text-[11px] text-[#7D7D7D] transition hover:bg-[#FAFAFA]">&gt;</button>
+                <button aria-label="Следующая страница" className="rounded-md border border-[#E4E5E7] px-2 py-1 text-[11px] text-[#7D7D7D] transition hover:bg-[#FAFAFA]">&gt;</button>
               </div>
               </div>
               <div className="ml-auto flex items-center gap-2">
