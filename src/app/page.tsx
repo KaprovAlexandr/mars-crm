@@ -81,7 +81,7 @@ export default function Home() {
         <main className="relative flex min-h-0 flex-1 flex-col p-4 md:p-5">
           <header className="mb-3 flex flex-wrap items-center gap-2">
             <h1 className="text-[36px] font-semibold leading-none tracking-tight text-[#1f1f1f]">Заявки</h1>
-            <span className="pt-3 text-[12px] text-[#A0A0A0]">108 заявок</span>
+            <span className="pt-3 text-[12px] text-[#A0A0A0]">{requests.length} заявок</span>
             <div className="ml-auto flex flex-wrap items-center gap-2">
               <div className="relative">
                 <input className="h-8 w-[300px] rounded-md border border-[#E4E5E7] bg-white pl-3 pr-8 text-[12px] text-[#8A8A8A] outline-none placeholder:text-[#B5B5B5]" placeholder="Найти по номеру заявки или другое" />
