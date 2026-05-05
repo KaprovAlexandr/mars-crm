@@ -1,3 +1,4 @@
+import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { requestWorks } from "@/lib/mock/request-details-page";
 import { requestsSidebarItems } from "@/lib/mock/requests-page";
@@ -12,9 +13,14 @@ export function RequestDetailsPage() {
             <button type="button" className="mr-2 text-[#6D7480]">←</button>
             <h1 className="text-[36px] leading-none font-semibold tracking-tight text-[#1f1f1f]">Заявка №943837</h1>
             <span className="ml-3 rounded-md bg-[#E7F2F8] px-3 py-1 text-[11px] font-medium text-[#6A95B0]">Диагностика</span>
-            <button className="ml-auto h-8 rounded-md bg-[#d51a21] px-3 text-[12px] font-medium text-white transition hover:bg-[#bd171d]">
-              Завершить заявку
-            </button>
+            <div className="ml-auto flex items-center gap-2">
+              <div className="lg:hidden">
+                <NavRailNotifications variant="compact" />
+              </div>
+              <button type="button" className="h-8 rounded-md bg-[#d51a21] px-3 text-[12px] font-medium text-white transition hover:bg-[#bd171d]">
+                Завершить заявку
+              </button>
+            </div>
           </header>
 
           <section className="mb-2 grid grid-cols-4 gap-2 rounded-xl border border-[#E6E7E9] bg-[#fafafa] p-3">
