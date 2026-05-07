@@ -4,8 +4,8 @@ import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
 import { appendJournalBookingSoonToFeed } from "@/lib/notifications/inAppNotificationFeed";
 import { appendUserActionLog } from "@/lib/notifications/actionActivityLog";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
-import type { CSSProperties, KeyboardEvent, MouseEvent, MutableRefObject, Ref } from "react";
-import { forwardRef, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { Booking, Service, Slot } from "../../lib/booking-journal/getAvailableSlots";
@@ -14,9 +14,6 @@ import type { Car, Client } from "../../lib/booking-journal/bookingClientsSearch
 import { findClientsByNationalPhone, findClientsBySurname } from "../../lib/booking-journal/bookingClientsSearch";
 import {
   displayRuPhoneComplete,
-  formatRu7PhoneMask,
-  national10AfterMaskedFieldInput,
-  nextRuPhoneMaskCaretIndex,
 } from "../../lib/booking-journal/ruPhoneMask";
 import {
   INITIAL_JOURNAL_BOOKINGS,
@@ -46,6 +43,8 @@ type BookingCard = {
   title: string;
   service: string;
   car: string;
+  masterShortName: string;
+  masterPhoto?: string;
   start: string;
   end: string;
   status?: BookingStatus;
@@ -60,12 +59,12 @@ function bookingCardMatchesSearch(card: BookingCard, qNorm: string): boolean {
 
 /** Фон и обводка всего слота по статусу. */
 const JOURNAL_STATUS_SLOT: Record<BookingStatus, string> = {
-  Подтверждена: "border border-[#A8D4B8] bg-[#E8F7EE]",
-  "Ожидает клиента": "border border-[#E8D49C] bg-[#FFFCF0]",
-  "В работе": "border border-[#A8C4F0] bg-[#ECF4FF]",
-  Завершена: "border border-[#D1D5DB] bg-[#F3F4F6]",
-  "Клиент не приехал": "border border-[#F5B5BD] bg-[#FFF0F3]",
-  Отменена: "border-2 border-[#991B1B] bg-white",
+  Подтверждена: "bg-[#E8F7EE]",
+  "Ожидает клиента": "bg-[#FFFCF0]",
+  "В работе": "bg-[#ECF4FF]",
+  Завершена: "bg-[#F3F4F6]",
+  "Клиент не приехал": "bg-[#FFF0F3]",
+  Отменена: "bg-white",
 };
 
 /** Бейдж статуса (согласован с фоном слота). */
@@ -76,6 +75,16 @@ const JOURNAL_STATUS_CHIP: Record<BookingStatus, string> = {
   Завершена: "bg-[#E5E7EB] text-[#374151]",
   "Клиент не приехал": "bg-[#FECACA] text-[#991B1B]",
   Отменена: "border border-[#991B1B] bg-white text-[#991B1B]",
+};
+
+/** Цвет плашки времени внутри карточки по статусу слота. */
+const JOURNAL_STATUS_TIME_BADGE: Record<BookingStatus, string> = {
+  Подтверждена: "bg-[#26B36A] text-white",
+  "Ожидает клиента": "bg-[#D5A321] text-white",
+  "В работе": "bg-[#2F7FEA] text-white",
+  Завершена: "bg-[#7B8494] text-white",
+  "Клиент не приехал": "bg-[#D95368] text-white",
+  Отменена: "bg-[#991B1B] text-white",
 };
 
 type BoxColumn = {
@@ -195,7 +204,7 @@ function buildSidebarCalendarCells(year: number, month1: number): { dateIso: str
 
 /**
  * Для любого дня, кроме демо 03.05.2026, если в колонке нет записей — два окна «свободно»
- * (8:00–13:40 и 14:00–19:40 по подписи), 4 колонки × 2 = 8 блоков.
+ * (8:00–13:40 и 14:00–19:40), 4 колонки × 2 = 8 блоков.
  * Иначе — обычные интервалы из расчёта буферов.
  */
 function getJournalFreeGapsForBoxDay(
@@ -207,7 +216,7 @@ function getJournalFreeGapsForBoxDay(
   if (date !== JOURNAL_SEED_DAY && !hasBookings) {
     return [
       { startMin: 8 * 60, endMin: 13 * 60 + 40 },
-      { startMin: 14 * 60, endMin: 20 * 60 },
+      { startMin: 14 * 60, endMin: 19 * 60 + 40 },
     ];
   }
   return getFreeIntervalsForBoxDay(date, boxId, bookings);
@@ -241,6 +250,20 @@ function defaultMasterIdForBox(boxId: string): string {
   return JOURNAL_MASTERS[Math.max(0, i)]?.id ?? "m1";
 }
 
+function assignmentKey(date: string, boxId: string): string {
+  return `${date}|${boxId}`;
+}
+
+function isMasterWorkingOnDate(master: (typeof JOURNAL_MASTERS)[number], date: string): boolean {
+  const [y, m, d] = date.split("-").map(Number);
+  const weekday = new Date(y, m - 1, d).getDay();
+  if (master.workWeekdays && master.workWeekdays.length > 0 && !master.workWeekdays.includes(weekday)) {
+    return false;
+  }
+  const status = master.dayStatusByDate?.[date] ?? "available";
+  return status === "available";
+}
+
 function buildInitialRows(): JournalRow[] {
   const day = journalTodayYmd();
   return INITIAL_JOURNAL_BOOKINGS.map((b) => ({
@@ -265,9 +288,11 @@ function rowsToBoxColumns(rows: JournalRow[], day: string): BoxColumn[] {
       .sort((a, b) => a.startTime.localeCompare(b.startTime))
       .map((r) => ({
         id: r.id,
-        title: r.clientTitle,
+        title: toClientShortName(r.clientTitle),
         service: r.service,
         car: r.car,
+        masterShortName: JOURNAL_MASTERS.find((m) => m.id === r.masterId)?.name ?? r.masterId,
+        masterPhoto: JOURNAL_MASTERS.find((m) => m.id === defaultMasterIdForBox(r.boxId))?.photoUrl,
         start: r.startTime.slice(11, 16),
         end: r.endTime.slice(11, 16),
         status: r.status,
@@ -283,12 +308,25 @@ function formatSlotLabel(slot: Slot): string {
   return `${t} · ${box} · ${master}`;
 }
 
+function toClientShortName(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length <= 1) return fullName.trim();
+  const surname = parts[0] ?? "";
+  const firstInitial = parts[1]?.[0];
+  return firstInitial ? `${surname} ${firstInitial}.` : surname;
+}
+
 /** Как в карточках макета: «Toyota Camry  123ВС777». */
 function formatCarLine(carModel: string, plateOrVin: string): string {
   const m = carModel.trim();
   const p = plateOrVin.trim();
   if (m && p) return `${m}  ${p}`;
   return m || p || "—";
+}
+
+function carTitleOnly(carLine: string): string {
+  const [model] = carLine.split(/\s{2,}/);
+  return (model ?? carLine).trim() || "—";
 }
 
 function toMinutes(time: string) {
@@ -303,6 +341,14 @@ function calcTop(start: string) {
 /** Конец рабочей сетки по меткам: последняя строка с подписью 19:40 (интервал 19:40–20:00). */
 const JOURNAL_GRID_LAST_SLOT_START_MIN = 19 * 60 + 40;
 const JOURNAL_WORK_END_MIN = 20 * 60;
+const JOURNAL_MIN_SERVICE_DURATION_MIN = 30;
+const TIRE_BOX_ID = "4";
+const TIRE_SERVICE_IDS = new Set(["tire1", "tire2", "tire3", "tire4", "tire5"]);
+const GENERAL_SERVICE_IDS = new Set([
+  "exp1", "exp2", "exp3", "exp4",
+  "std2", "std3", "std4",
+  "cmp1", "cmp2", "cmp3", "cmp4",
+]);
 
 /** Хвост дня в данных — до 20:00; в подписи показываем «до 19:40», как на сетке. */
 function formatFreeGapEndLabelForUi(endMin: number): string {
@@ -352,11 +398,31 @@ function toTimeLabel(minutes: number) {
   return `${hh}:${mm}`;
 }
 
-/** Рамка и размер как у «Поиск по телефону или ФИО» на странице Заявки. */
-const REQUESTS_PHONE_FIELD_SHELL =
-  "relative flex h-12 w-full min-w-0 items-center rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 outline-none";
+function filterSlotsByPrefillWindow(slots: Slot[], prefill: ModalPrefill | null): Slot[] {
+  if (!prefill) return slots;
+  const fromMin = hhmmToMinutes(prefill.startIso.slice(11, 16));
+  const toMin = prefill.gapEndMinute;
+  return slots.filter((slot) => {
+    if (slot.boxId !== prefill.boxId) return false;
+    const slotStartMin = hhmmToMinutes(slot.startTime.slice(11, 16));
+    const slotEndMin = hhmmToMinutes(slot.endTime.slice(11, 16));
+    return slotStartMin >= fromMin && slotEndMin <= toMin;
+  });
+}
 
-const REQUESTS_PHONE_OVERLAY_TEXT = "text-[18px] font-medium tracking-[-0.04em]";
+function gapUiEndMinute(endMin: number): number {
+  return endMin >= JOURNAL_WORK_END_MIN ? JOURNAL_GRID_LAST_SLOT_START_MIN : endMin;
+}
+
+function slotFitsVisibleFreeWindow(date: string, slot: Slot, bookings: Booking[]): boolean {
+  const slotStartMin = hhmmToMinutes(slot.startTime.slice(11, 16));
+  const slotEndMin = hhmmToMinutes(slot.endTime.slice(11, 16));
+  const gaps = getJournalFreeGapsForBoxDay(date, slot.boxId, bookings);
+  return gaps.some((gap) => {
+    const uiEndMin = gapUiEndMinute(gap.endMin);
+    return slotStartMin >= gap.startMin && slotEndMin <= uiEndMin;
+  });
+}
 
 /** Поле поиска на странице «Заявки», светлая тема (без переключения dark). */
 const REQUESTS_SEARCH_INPUT_LIGHT_CLASS =
@@ -408,188 +474,27 @@ function JournalModalDateCalendarIcon() {
   );
 }
 
-function ruPhoneMaskDisplayCharClass(ch: string): string {
-  if (ch >= "0" && ch <= "9") return "text-black";
-  if (ch === "_" || ch === "\u00B7") return "text-[#B5B5B5]";
-  return "text-[#8A8A8A]";
+function maskRuPhoneInput(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  if (!digits) return "";
+  const normalized = digits.startsWith("8") ? `7${digits.slice(1)}` : digits.startsWith("7") ? digits : `7${digits}`;
+  const body = normalized.slice(1, 11);
+  const p1 = body.slice(0, 3);
+  const p2 = body.slice(3, 6);
+  const p3 = body.slice(6, 8);
+  const p4 = body.slice(8, 10);
+  if (body.length <= 3) return `+7${p1 ? ` (${p1}` : ""}`;
+  if (body.length <= 6) return `+7 (${p1}) ${p2}`;
+  if (body.length <= 8) return `+7 (${p1}) ${p2}-${p3}`;
+  return `+7 (${p1}) ${p2}-${p3}-${p4}`;
 }
 
-function caretLeftPxInCharsRoot(charsRoot: HTMLElement, selectionIndex: number): number {
-  const n = charsRoot.children.length;
-  const i = Math.min(Math.max(0, selectionIndex), n);
-  const rootRect = charsRoot.getBoundingClientRect();
-  if (i === 0) {
-    const first = charsRoot.children[0] as HTMLElement | undefined;
-    return first ? first.getBoundingClientRect().left - rootRect.left : 0;
-  }
-  const before = charsRoot.children[i - 1] as HTMLElement | undefined;
-  return before ? before.getBoundingClientRect().right - rootRect.left : 0;
+function national10FromPhoneInput(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  if (!digits) return "";
+  const normalized = digits.startsWith("8") ? `7${digits.slice(1)}` : digits.startsWith("7") ? digits : `7${digits}`;
+  return normalized.slice(1, 11);
 }
-
-/** Смещение каретки «|» от левого края оболочки поля (с учётом padding). */
-function caretLeftPxFromShellEdge(shell: HTMLElement, charsRoot: HTMLElement, selectionIndex: number): number {
-  return (
-    charsRoot.getBoundingClientRect().left -
-    shell.getBoundingClientRect().left +
-    caretLeftPxInCharsRoot(charsRoot, selectionIndex)
-  );
-}
-
-type RuRequestsStylePhoneFieldProps = {
-  id: string;
-  nationalDigits: string;
-  onNationalDigitsChange: (digits: string) => void;
-  wrapperClassName?: string;
-};
-
-function assignRef<T>(ref: Ref<T> | undefined, node: T | null) {
-  if (!ref) return;
-  if (typeof ref === "function") ref(node);
-  else (ref as MutableRefObject<T | null>).current = node;
-}
-
-const RuRequestsStylePhoneField = forwardRef<HTMLInputElement, RuRequestsStylePhoneFieldProps>(
-  function RuRequestsStylePhoneField(
-    { id, nationalDigits, onNationalDigitsChange, wrapperClassName },
-    forwardedRef,
-  ) {
-    const innerRef = useRef<HTMLInputElement | null>(null);
-    const shellRef = useRef<HTMLDivElement | null>(null);
-    const charsRef = useRef<HTMLSpanElement | null>(null);
-    const skipInsertCaretOnFocusRef = useRef(false);
-    const pendingSelectionRef = useRef<number | null>(null);
-    const mask = formatRu7PhoneMask(nationalDigits);
-
-    const [caretTick, setCaretTick] = useState(0);
-    const [caretLeftPx, setCaretLeftPx] = useState(-1);
-
-    const bumpCaretMeasure = useCallback(() => {
-      setCaretTick((t) => t + 1);
-    }, []);
-
-    const scheduleCaretToInsertSlot = useCallback(() => {
-      const el = innerRef.current;
-      if (!el) return;
-      const pos = nextRuPhoneMaskCaretIndex(mask);
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          if (document.activeElement !== el) return;
-          el.setSelectionRange(pos, pos);
-          bumpCaretMeasure();
-        });
-      });
-    }, [mask, bumpCaretMeasure]);
-
-    useLayoutEffect(() => {
-      const el = innerRef.current;
-      const charsRoot = charsRef.current;
-      const shell = shellRef.current;
-
-      if (el && document.activeElement === el && pendingSelectionRef.current !== null) {
-        const p = Math.min(Math.max(0, pendingSelectionRef.current), mask.length);
-        el.setSelectionRange(p, p);
-        pendingSelectionRef.current = null;
-      }
-
-      if (!el || !charsRoot || !shell || document.activeElement !== el) {
-        setCaretLeftPx(-1);
-        return;
-      }
-      const idx = Math.min(Math.max(0, el.selectionStart ?? 0), mask.length);
-      const base = caretLeftPxFromShellEdge(shell, charsRoot, idx);
-      setCaretLeftPx(base + 1);
-    }, [mask, caretTick]);
-
-    useEffect(() => {
-      const onSel = () => {
-        if (document.activeElement === innerRef.current) bumpCaretMeasure();
-      };
-      document.addEventListener("selectionchange", onSel);
-      return () => document.removeEventListener("selectionchange", onSel);
-    }, [bumpCaretMeasure]);
-
-    return (
-      <div ref={shellRef} className={`${REQUESTS_PHONE_FIELD_SHELL} ${wrapperClassName ?? "mt-1.5"}`}>
-        <div
-          className={`pointer-events-none relative z-[1] flex min-w-0 flex-1 items-center overflow-hidden ${REQUESTS_PHONE_OVERLAY_TEXT}`}
-          aria-hidden
-        >
-          <span ref={charsRef} className="inline-flex min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap">
-            {Array.from(mask).map((ch, i) => (
-              <span key={i} className={ruPhoneMaskDisplayCharClass(ch)}>
-                {ch}
-              </span>
-            ))}
-          </span>
-        </div>
-        <input
-          ref={(node) => {
-            innerRef.current = node;
-            assignRef(forwardedRef, node);
-          }}
-          id={id}
-          type="tel"
-          inputMode="numeric"
-          autoComplete="tel"
-          spellCheck={false}
-          className={`absolute inset-0 z-[2] h-full w-full cursor-text border-0 bg-transparent px-3 ${REQUESTS_PHONE_OVERLAY_TEXT} opacity-0 caret-transparent outline-none`}
-          value={mask}
-          onChange={(e) => {
-            const el = e.target as HTMLInputElement;
-            const ne = e.nativeEvent as InputEvent;
-            const inputType = ne.inputType;
-            const newDigits = national10AfterMaskedFieldInput(
-              nationalDigits,
-              mask,
-              el.value,
-              inputType,
-            );
-            const newMask = formatRu7PhoneMask(newDigits);
-            const insertedDigit =
-              inputType === "insertText" && ne.data !== null && /^[0-9]$/.test(ne.data);
-            const digitGrowth = newDigits.length > nationalDigits.length;
-            const digitShrink = newDigits.length < nationalDigits.length;
-            if (insertedDigit || digitGrowth || digitShrink) {
-              pendingSelectionRef.current = nextRuPhoneMaskCaretIndex(newMask);
-            } else {
-              pendingSelectionRef.current = Math.min(Math.max(0, el.selectionStart ?? 0), newMask.length);
-            }
-            onNationalDigitsChange(newDigits);
-          }}
-          onFocus={() => {
-            requestAnimationFrame(() => {
-              const skip = skipInsertCaretOnFocusRef.current;
-              skipInsertCaretOnFocusRef.current = false;
-              if (skip) {
-                bumpCaretMeasure();
-                return;
-              }
-              scheduleCaretToInsertSlot();
-            });
-          }}
-          onMouseDown={(e) => {
-            if (e.button !== 0) return;
-            if (document.activeElement !== innerRef.current) {
-              skipInsertCaretOnFocusRef.current = true;
-            }
-          }}
-          onMouseUp={bumpCaretMeasure}
-          onKeyUp={bumpCaretMeasure}
-        />
-        {caretLeftPx >= 0 ? (
-          <span
-            className={`animate-ru-phone-caret pointer-events-none absolute top-1/2 z-[3] -translate-y-1/2 leading-none text-black ${REQUESTS_PHONE_OVERLAY_TEXT}`}
-            style={{ left: caretLeftPx }}
-            aria-hidden
-          >
-            |
-          </span>
-        ) : null}
-      </div>
-    );
-  },
-);
-RuRequestsStylePhoneField.displayName = "RuRequestsStylePhoneField";
 
 type JournalSoonNotice = { line1: string; line2: string };
 
@@ -621,6 +526,10 @@ export function BookingJournalPage() {
   const [isNewBookingModalOpen, setIsNewBookingModalOpen] = useState(false);
   const [modalPrefill, setModalPrefill] = useState<ModalPrefill | null>(null);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [isServiceMenuOpen, setIsServiceMenuOpen] = useState(false);
+  const [assignedMastersByDateBox, setAssignedMastersByDateBox] = useState<Record<string, string>>({});
+  const [assignModalBoxId, setAssignModalBoxId] = useState<string | null>(null);
+  const [assignModalSelectedMasterId, setAssignModalSelectedMasterId] = useState<string | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(() => journalTodayYmd());
   const [availableSlots, setAvailableSlots] = useState<Slot[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
@@ -651,6 +560,37 @@ export function BookingJournalPage() {
     () => rowsToBoxColumns(journalRows, journalViewDate),
     [journalRows, journalViewDate],
   );
+  const dayBookingsCount = useMemo(
+    () => journalRows.filter((r) => r.startTime.slice(0, 10) === journalViewDate).length,
+    [journalRows, journalViewDate],
+  );
+  const isAllSlotsFreeDay = dayBookingsCount === 0;
+  const assignedMasterIdForBoxDate = useCallback(
+    (date: string, boxId: string) => assignedMastersByDateBox[assignmentKey(date, boxId)] ?? defaultMasterIdForBox(boxId),
+    [assignedMastersByDateBox],
+  );
+  const availableMastersForViewDate = useMemo(
+    () => JOURNAL_MASTERS.filter((master) => isMasterWorkingOnDate(master, journalViewDate)),
+    [journalViewDate],
+  );
+  const assignedMasterIdsForViewDate = useMemo(() => {
+    const prefix = `${journalViewDate}|`;
+    return new Set(
+      Object.entries(assignedMastersByDateBox)
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([, masterId]) => masterId),
+    );
+  }, [assignedMastersByDateBox, journalViewDate]);
+  const assignModalBoxTitle = assignModalBoxId
+    ? (BOX_COLUMN_LAYOUT.find((b) => b.boxId === assignModalBoxId)?.title ?? `Бокс №${assignModalBoxId}`)
+    : "";
+  const dayFreeWindowsCount = useMemo(() => {
+    const bookings = toBookings(journalRows);
+    return BOX_COLUMN_LAYOUT.reduce(
+      (acc, col) => acc + getJournalFreeGapsForBoxDay(journalViewDate, col.boxId, bookings).length,
+      0,
+    );
+  }, [journalRows, journalViewDate]);
 
   useLayoutEffect(() => {
     const bid = searchParams.get("booking");
@@ -758,6 +698,20 @@ export function BookingJournalPage() {
     newClientPhoneDigits,
     newClientCar,
   ]);
+  const prefillMaxDurationMin = modalPrefill
+    ? Math.max(0, modalPrefill.gapEndMinute - hhmmToMinutes(modalPrefill.startIso.slice(11, 16)))
+    : null;
+  const step2BaseServices = modalPrefill?.boxId === TIRE_BOX_ID
+    ? JOURNAL_SERVICES.filter((s) => TIRE_SERVICE_IDS.has(s.id))
+    : modalPrefill
+      ? JOURNAL_SERVICES.filter((s) => GENERAL_SERVICE_IDS.has(s.id))
+      : JOURNAL_SERVICES;
+  const step2DurationScopedServices = prefillMaxDurationMin === null
+    ? step2BaseServices
+    : step2BaseServices.filter((s) => s.duration <= prefillMaxDurationMin);
+  const step2ScopedServices = (modalPrefill?.boxId === TIRE_BOX_ID
+    ? step2DurationScopedServices.filter((s) => TIRE_SERVICE_IDS.has(s.id))
+    : step2DurationScopedServices);
 
   useEffect(() => {
     const id = window.setInterval(() => setHeaderClock(formatHeaderClockNow()), 1000);
@@ -836,6 +790,16 @@ export function BookingJournalPage() {
     return () => cancelAnimationFrame(id);
   }, [isNewBookingModalOpen, currentStep, step1ClientMode]);
 
+  useEffect(() => {
+    if (currentStep !== 2) setIsServiceMenuOpen(false);
+  }, [currentStep]);
+
+  useEffect(() => {
+    if (!selectedService) return;
+    if (step2ScopedServices.some((s) => s.id === selectedService.id)) return;
+    setSelectedService(null);
+  }, [selectedService, step2ScopedServices]);
+
   function wizardNextFromStep1() {
     if (!step1Complete) {
       if (step1ClientMode === "phone") {
@@ -855,7 +819,15 @@ export function BookingJournalPage() {
 
   function wizardNextFromStep2() {
     if (!selectedService || !selectedDate) {
-      setConfirmError("Выберите услугу и дату.");
+      setConfirmError("Выберите тип обращения и дату.");
+      return;
+    }
+    if (step2ScopedServices.length === 0) {
+      setConfirmError("Сейчас нет доступных типов обращения.");
+      return;
+    }
+    if (prefillMaxDurationMin !== null && selectedService.duration > prefillMaxDurationMin) {
+      setConfirmError(`Для этого свободного окна доступны услуги до ${prefillMaxDurationMin} мин.`);
       return;
     }
     const bookingsSlice = toBookings(journalRows);
@@ -865,8 +837,19 @@ export function BookingJournalPage() {
       boxes: JOURNAL_BOXES,
       masters: JOURNAL_MASTERS,
       bookings: bookingsSlice,
+      assignedMasterByBox: Object.fromEntries(
+        BOX_COLUMN_LAYOUT.map((col) => [col.boxId, assignedMasterIdForBoxDate(selectedDate, col.boxId)]),
+      ),
     });
-    setAvailableSlots(all);
+    const slotsInsideVisibleWindows = all
+      .filter((slot) => slotFitsVisibleFreeWindow(selectedDate, slot, bookingsSlice))
+      .filter((slot) => {
+        if (TIRE_SERVICE_IDS.has(selectedService.id)) return slot.boxId === TIRE_BOX_ID;
+        if (GENERAL_SERVICE_IDS.has(selectedService.id)) return slot.boxId !== TIRE_BOX_ID;
+        return true;
+      });
+    const scopedSlots = filterSlotsByPrefillWindow(slotsInsideVisibleWindows, modalPrefill);
+    setAvailableSlots(scopedSlots);
     setConfirmError(null);
 
     if (modalPrefill) {
@@ -877,20 +860,11 @@ export function BookingJournalPage() {
         startMinute: startMin,
         durationMin: selectedService.duration,
         gapEndMinute: modalPrefill.gapEndMinute,
-        defaultMasterId: defaultMasterIdForBox(modalPrefill.boxId),
+        defaultMasterId: assignedMasterIdForBoxDate(selectedDate, modalPrefill.boxId),
         bookings: bookingsSlice,
       });
-      const slot = preferred ?? findNearestSlotByTime(modalPrefill.startIso, all);
+      const slot = preferred ?? findNearestSlotByTime(modalPrefill.startIso, scopedSlots);
       setSelectedSlot(slot);
-      const ok =
-        slot !== null &&
-        all.some((s) => slotKey(s) === slotKey(slot)) &&
-        isSlotStillFree(slot, bookingsSlice);
-      if (ok) {
-        setSkippedSlotStep(true);
-        setCurrentStep(4);
-        return;
-      }
     } else {
       setSelectedSlot(null);
     }
@@ -926,6 +900,7 @@ export function BookingJournalPage() {
     setCurrentStep(1);
     setSkippedSlotStep(false);
     setSelectedService(null);
+    setIsServiceMenuOpen(false);
     setSelectedDate(prefill?.startIso.slice(0, 10) ?? journalViewDate);
     setSelectedSlot(null);
     setAvailableSlots([]);
@@ -941,6 +916,7 @@ export function BookingJournalPage() {
     setSkippedSlotStep(false);
     setModalPrefill(null);
     setSelectedService(null);
+    setIsServiceMenuOpen(false);
     setSelectedDate(journalViewDate);
     setSelectedSlot(null);
     setAvailableSlots([]);
@@ -993,8 +969,10 @@ export function BookingJournalPage() {
     if (!startHHmm) return;
     const proposedMin = hhmmToMinutes(startHHmm);
     const startMin = snapTimelineClickStartMinute(journalViewDate, boxId, proposedMin, toBookings(journalRows));
-    const gapEnd = getFreeWindowEndMinute(journalViewDate, boxId, startMin, toBookings(journalRows));
+    const rawGapEnd = getFreeWindowEndMinute(journalViewDate, boxId, startMin, toBookings(journalRows));
+    const gapEnd = rawGapEnd >= JOURNAL_WORK_END_MIN ? JOURNAL_GRID_LAST_SLOT_START_MIN : rawGapEnd;
     if (gapEnd <= startMin) return;
+    if (gapEnd - startMin < JOURNAL_MIN_SERVICE_DURATION_MIN) return;
     const startLabel = toTimeLabel(startMin);
     openNewBookingModal({ boxId, startIso: `${journalViewDate}T${startLabel}:00`, gapEndMinute: gapEnd });
   }
@@ -1067,8 +1045,9 @@ export function BookingJournalPage() {
   const boxName = selectedSlot ? JOURNAL_BOXES.find((b) => b.id === selectedSlot.boxId)?.name ?? "" : "";
   const masterName = selectedSlot ? JOURNAL_MASTERS.find((m) => m.id === selectedSlot.masterId)?.name ?? "" : "";
   const timeLabel = selectedSlot ? `${selectedSlot.startTime.slice(11, 16)} — ${selectedSlot.endTime.slice(11, 16)}` : "";
+  const stepSlots = availableSlots;
 
-  const stepLabels = ["Телефон", "Услуга", "Время", "Подтверждение"] as const;
+  const stepLabels = ["Идентификация", "Тип обращения", "Время", "Подтверждение"] as const;
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.04em]">
@@ -1146,7 +1125,7 @@ export function BookingJournalPage() {
                   <button
                     type="button"
                     onClick={() => openNewBookingModal(null)}
-                    className="h-12 shrink-0 rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-[#EC1C24] hover:bg-white hover:text-[#EC1C24]"
+                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
                   >
                     Новая запись
                   </button>
@@ -1179,7 +1158,7 @@ export function BookingJournalPage() {
             ) : null}
 
             <div className="border-r border-[#ECEEF1] bg-white">
-              <div className="flex h-[56px] items-center justify-center border-b border-[#ECEEF1] p-3 text-[13px] font-medium text-[#616B79]">Время</div>
+              <div className="flex h-[68px] items-center justify-center border-b border-[#ECEEF1] p-3 text-[13px] font-medium text-[#616B79]">Время</div>
               <div>
                 {timeSlots.map((time) => (
                   <div key={time} className="flex h-10 items-center justify-center border-b border-dashed border-[#EFF1F4] text-[12px] font-medium text-[#9099A8]">
@@ -1192,20 +1171,45 @@ export function BookingJournalPage() {
             <div className="grid grid-cols-4">
               {displayColumns.map((column, colIndex) => {
                 const boxId = BOX_COLUMN_LAYOUT[colIndex]?.boxId ?? String(colIndex + 1);
+                const columnMasterId = assignedMasterIdForBoxDate(journalViewDate, boxId);
+                const columnMaster = JOURNAL_MASTERS.find((m) => m.id === columnMasterId) ?? JOURNAL_MASTERS[colIndex];
+                const hasAssignedMasterForDateBox = Boolean(
+                  assignedMastersByDateBox[assignmentKey(journalViewDate, boxId)],
+                );
                 const searchNorm = journalSearchQuery.trim().toLowerCase();
                 return (
                 <div key={column.title} className="relative border-r border-[#ECEEF1] last:border-r-0">
-                  <div className="flex h-[56px] items-center justify-center border-b border-[#ECEEF1] px-4 py-3">
-                    <div className="inline-flex items-center justify-center gap-[12px]">
-                      <span className="inline-flex h-8 w-8 items-center justify-center rounded-[10px] bg-[#F3F3F5]">
-                        <img
-                          src={column.title === "Шиномонтаж" ? "/hugeicons_tire.svg" : "/la_car-side.svg"}
-                          alt=""
-                          className="h-5 w-5"
-                        />
-                      </span>
-                      <p className="text-[20px] font-semibold leading-none">{column.title}</p>
-                    </div>
+                  <div className="flex h-[68px] items-center justify-center border-b border-[#ECEEF1] px-4 py-2">
+                    {isAllSlotsFreeDay && !hasAssignedMasterForDateBox ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setAssignModalBoxId(boxId);
+                          setAssignModalSelectedMasterId(null);
+                        }}
+                        className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
+                      >
+                        Назначить на {column.title}
+                      </button>
+                    ) : (
+                      <div className="mx-auto inline-flex items-center justify-center gap-[12px]">
+                        <span className="inline-flex h-[37px] w-[37px] shrink-0 items-center justify-center self-center overflow-hidden rounded-full bg-[#F3F3F5]">
+                          {columnMaster?.photoUrl ? (
+                            <img
+                              src={columnMaster.photoUrl}
+                              alt={columnMaster.name}
+                              className="h-[37px] w-[37px] object-cover"
+                            />
+                          ) : (
+                            <span className="text-[11px] font-semibold text-[#6D788A]">М</span>
+                          )}
+                        </span>
+                        <div className="inline-flex flex-col items-start justify-center gap-1">
+                          <p className="text-[20px] font-semibold leading-none">{column.worker}</p>
+                          <p className="text-[13px] font-medium leading-none text-[#7D7D81]">{column.title}</p>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div
@@ -1222,33 +1226,43 @@ export function BookingJournalPage() {
                       const endHHmmForLabel = formatFreeGapEndLabelForUi(gap.endMin);
                       const topPx = calcTop(startHHmm);
                       const hPx = calcFreeStripeHeightPx(gap, boxId, journalViewDate, toBookings(journalRows));
+                      const uiEndMin = gap.endMin >= JOURNAL_WORK_END_MIN ? JOURNAL_GRID_LAST_SLOT_START_MIN : gap.endMin;
+                      const isTooShortGap = uiEndMin - gap.startMin < JOURNAL_MIN_SERVICE_DURATION_MIN;
                       return (
                         <div
                           key={`free-${boxId}-${gi}-${gap.startMin}`}
-                          className="pointer-events-none absolute left-2 right-2 z-[5] overflow-hidden rounded-lg border border-[#E4EDF5]"
-                          style={{ top: topPx, height: hPx, ...JOURNAL_FREE_SLOT_STRIPE_BG }}
+                          className="pointer-events-none absolute left-2 right-2 z-[5] overflow-hidden rounded-lg"
+                          style={{
+                            top: topPx,
+                            height: hPx,
+                            ...(isTooShortGap
+                              ? { backgroundColor: "#ffffff" }
+                              : JOURNAL_FREE_SLOT_STRIPE_BG),
+                          }}
                         >
-                          <div className="pointer-events-none absolute inset-0 flex min-h-0 items-center justify-center p-2">
-                            <div className="flex max-h-full min-w-0 flex-col items-center gap-2 text-center">
-                              <p className="pointer-events-none shrink-0 text-[12px] font-medium leading-snug text-[#5A6472]">
-                                Свободная заявка с {startHHmm} до {endHHmmForLabel}
-                              </p>
-                              <button
-                                type="button"
-                                className="pointer-events-auto shrink-0 cursor-pointer rounded-lg bg-[#EC1C24] px-4 py-2 text-[13px] font-medium text-white shadow-sm hover:bg-[#d91922]"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  openNewBookingModal({
-                                    boxId,
-                                    startIso: `${journalViewDate}T${startHHmm}:00`,
-                                    gapEndMinute: gap.endMin,
-                                  });
-                                }}
-                              >
-                                Новая запись
-                              </button>
+                          {!isTooShortGap ? (
+                            <div className="pointer-events-none absolute inset-0 flex min-h-0 items-center justify-center p-2">
+                              <div className="flex max-h-full min-w-0 flex-col items-center gap-2 text-center">
+                                <p className="pointer-events-none shrink-0 text-[12px] font-medium leading-snug text-[#5A6472]">
+                                  Свободная заявка с {startHHmm} до {endHHmmForLabel}
+                                </p>
+                                <button
+                                  type="button"
+                                  className="pointer-events-auto shrink-0 cursor-pointer rounded-lg bg-[#EC1C24] px-4 py-2 text-[13px] font-medium text-white shadow-sm"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openNewBookingModal({
+                                      boxId,
+                                      startIso: `${journalViewDate}T${startHHmm}:00`,
+                                      gapEndMinute: uiEndMin,
+                                    });
+                                  }}
+                                >
+                                  Новая запись
+                                </button>
+                              </div>
                             </div>
-                          </div>
+                          ) : null}
                         </div>
                       );
                     })}
@@ -1263,8 +1277,8 @@ export function BookingJournalPage() {
                         ref={(el) => {
                           bookingArticleRefs.current[card.id] = el;
                         }}
-                        className={`absolute left-2 right-2 flex flex-col overflow-hidden rounded-lg border border-solid p-3 pb-8 transition-[opacity,filter,box-shadow] duration-200 ${
-                          card.status ? JOURNAL_STATUS_SLOT[card.status] : "border-[#E5E7EB] bg-[#FAFBFC]"
+                        className={`absolute left-2 right-2 flex flex-col overflow-hidden rounded-lg p-3 pb-8 transition-[opacity,filter,box-shadow] duration-200 ${
+                          card.status ? JOURNAL_STATUS_SLOT[card.status] : "bg-[#FAFBFC]"
                         } ${
                           dimmed
                             ? "pointer-events-none z-[8] opacity-[0.22] grayscale"
@@ -1276,14 +1290,20 @@ export function BookingJournalPage() {
                         }`}
                         style={{ top: calcTop(card.start), height: calcCardHeightInclusive(card.start, card.end) }}
                       >
-                        <p className="shrink-0 text-[12px] leading-[1.25] text-[#6B7688]">{card.start} - {card.end}</p>
+                        <div
+                          className={`-mx-3 -mt-3 mb-1.5 flex h-6 w-[calc(100%+24px)] shrink-0 items-center px-3 text-[14px] font-semibold leading-none ${
+                            card.status ? JOURNAL_STATUS_TIME_BADGE[card.status] : "bg-[#6B7688] text-white"
+                          }`}
+                        >
+                          <span>{card.start}–{card.end}</span>
+                        </div>
                         <p className="mt-1 shrink-0 truncate text-[17px] font-semibold leading-[1.28]">{card.title}</p>
-                        <p className="mt-0.5 shrink-0 truncate text-[13px] leading-[1.3] text-[#2E3642]">{card.service}</p>
-                        <p className="mt-0.5 shrink-0 truncate text-[13px] leading-[1.3] text-[#2E3642]">{card.car}</p>
+                        <p className="mt-0.5 shrink-0 truncate text-[13px] font-medium leading-[1.3] text-[#2E3642]">{carTitleOnly(card.car)}</p>
+                        <p className="mt-0.5 shrink-0 truncate text-[13px] font-medium leading-[1.3] text-[#2E3642]">{card.service}</p>
                         {card.status ? (
-                          <div className="absolute bottom-2 right-3 max-w-[min(100%,12rem)]">
+                          <div className="absolute bottom-2 right-3">
                             <span
-                              className={`inline-block rounded-full px-2 py-1 text-right text-[10px] font-semibold leading-snug ${JOURNAL_STATUS_CHIP[card.status]}`}
+                              className={`inline-block shrink-0 rounded-full px-2 py-1 text-right text-[11px] font-semibold leading-snug ${JOURNAL_STATUS_CHIP[card.status]}`}
                             >
                               {card.status}
                             </span>
@@ -1303,7 +1323,7 @@ export function BookingJournalPage() {
 
           <section className="w-[310px] shrink-0">
           <aside className="w-[310px] self-start bg-white">
-            <section className="rounded-[10px] border-[3px] border-[#E4E5E7] px-5 py-5 font-medium">
+            <section className="rounded-[10px] border border-[#ECEEF1] px-5 py-5 font-medium">
               <div>
                 <div className="mb-4 flex items-center justify-between text-[18px] font-semibold">
                   <button
@@ -1366,16 +1386,16 @@ export function BookingJournalPage() {
           </aside>
           </section>
             </section>
-            <section className="absolute bottom-5 right-5 w-[310px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-5 py-5 font-medium">
+            <section className="absolute bottom-5 right-5 w-[310px] rounded-[10px] border border-[#ECEEF1] bg-white px-5 py-5 font-medium">
               <h3 className="text-[20px] font-semibold text-black">Статистика за день</h3>
               <div className="mt-3 space-y-2 text-[14px]">
                 <div className="flex justify-between">
                   <span className="text-[#6E7788]">Всего записей</span>
-                  <span className="font-semibold">8</span>
+                  <span className="font-semibold">{dayBookingsCount}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-[#6E7788]">Свободных окон</span>
-                  <span className="font-semibold">16</span>
+                  <span className="font-semibold">{dayFreeWindowsCount}</span>
                 </div>
               </div>
             </section>
@@ -1389,7 +1409,7 @@ export function BookingJournalPage() {
                 <div
                   role="dialog"
                   aria-labelledby="new-booking-title"
-                  className="max-h-[90vh] w-full max-w-[440px] overflow-y-auto rounded-[14px] border border-[#E4E5E7] bg-white p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.35)]"
+                  className="w-full max-w-[440px] overflow-visible rounded-[14px] border border-[#E4E5E7] bg-white p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.35)]"
                   onClick={(e) => e.stopPropagation()}
                   onKeyDownCapture={(e: KeyboardEvent<HTMLDivElement>) => {
                     if (currentStep !== 1) return;
@@ -1416,7 +1436,7 @@ export function BookingJournalPage() {
                     Новая запись
                   </h2>
 
-                  <p className="mt-3 flex flex-wrap items-center justify-center gap-x-1.5 text-center text-[12px] font-medium text-[#B0B6C1]">
+                  <p className="mt-3 flex flex-wrap items-center justify-start gap-x-1.5 text-left text-[12px] font-medium text-[#B0B6C1]">
                     {stepLabels.map((label, idx) => (
                       <span key={label} className="inline-flex items-center gap-x-1.5">
                         <span
@@ -1442,26 +1462,28 @@ export function BookingJournalPage() {
                           <label htmlFor="new-booking-call-phone" className="mt-5 block text-[14px] font-medium text-[#5A6472]">
                             Телефон
                           </label>
-                          <RuRequestsStylePhoneField
+                          <input
                             ref={callPhoneInputRef}
                             id="new-booking-call-phone"
-                            nationalDigits={callNationalDigits}
-                            onNationalDigitsChange={(d) => {
-                              setCallNationalDigits(d);
+                            type="tel"
+                            autoComplete="tel"
+                            inputMode="numeric"
+                            value={maskRuPhoneInput(callNationalDigits)}
+                            onChange={(e) => {
+                              setCallNationalDigits(national10FromPhoneInput(e.target.value));
                               setConfirmError(null);
                             }}
+                            className={`mt-1.5 ${JOURNAL_MODAL_REQUESTS_LIKE_FIELD_CLASS} placeholder:text-[#B5B5B5]`}
+                            placeholder="+7 (999) 000-00-00"
                           />
 
                           {matchedByPhone.length > 0 ? (
                             <div className="mt-4 space-y-3">
                               {matchedByPhone.map((c) => (
-                                <div key={c.id} className="rounded-[10px] border border-[#ECEEF1] bg-[#F9FAFB] p-3">
+                                <div key={c.id} className="rounded-[10px] bg-[#ECECEF] p-3">
                                   <p className="text-[15px] font-semibold text-[#111826]">{c.name}</p>
                                   <p className="mt-0.5 text-[14px] text-[#5A6472]">{c.phone}</p>
-                                  <p className="mt-2 text-[12px] font-medium uppercase tracking-wide text-[#8A93A3]">
-                                    Автомобили
-                                  </p>
-                                  <div className="mt-1.5 flex flex-wrap gap-2">
+                                  <div className="mt-3 flex flex-wrap gap-2">
                                     {c.cars.map((car) => {
                                       const picked = selectedClient?.id === c.id && selectedCar?.id === car.id;
                                       return (
@@ -1473,14 +1495,14 @@ export function BookingJournalPage() {
                                             setSelectedCar(car);
                                             setConfirmError(null);
                                           }}
-                                          className={`rounded-lg border px-3 py-2 text-left text-[13px] font-medium ${
+                                          className={`rounded-lg px-3 py-2 text-left text-[13px] font-medium ${
                                             picked
-                                              ? "border-[#EC1C24] bg-[#FCE6E8] text-[#111826]"
-                                              : "border-[#E4E5E7] bg-white text-[#3B4656]"
+                                              ? "bg-[#EC1C24] text-white"
+                                              : "bg-white text-[#3B4656]"
                                           }`}
                                         >
                                           {car.model}
-                                          <span className="block text-[12px] font-normal text-[#6D788A]">
+                                          <span className={`block text-[12px] font-normal ${picked ? "text-white/90" : "text-[#6D788A]"}`}>
                                             {car.plate || "—"}
                                           </span>
                                         </button>
@@ -1537,7 +1559,7 @@ export function BookingJournalPage() {
                             id="new-booking-link-surname"
                             type="text"
                             autoComplete="family-name"
-                            className={`mt-1.5 ${REQUESTS_SEARCH_INPUT_LIGHT_CLASS}`}
+                            className={`mt-1.5 ${REQUESTS_SEARCH_INPUT_LIGHT_CLASS} text-black`}
                             placeholder="Введите фамилию..."
                             value={linkSurnameQuery}
                             onChange={(e) => {
@@ -1548,13 +1570,10 @@ export function BookingJournalPage() {
                           {matchedBySurname.length > 0 ? (
                             <div className="mt-4 space-y-3">
                               {matchedBySurname.map((c) => (
-                                <div key={c.id} className="rounded-[10px] border border-[#ECEEF1] bg-[#F9FAFB] p-3">
+                                <div key={c.id} className="rounded-[10px] bg-[#ECECEF] p-3">
                                   <p className="text-[15px] font-semibold text-[#111826]">{c.name}</p>
                                   <p className="mt-0.5 text-[14px] text-[#5A6472]">{c.phone}</p>
-                                  <p className="mt-2 text-[12px] font-medium uppercase tracking-wide text-[#8A93A3]">
-                                    Автомобили
-                                  </p>
-                                  <div className="mt-1.5 flex flex-wrap gap-2">
+                                  <div className="mt-3 flex flex-wrap gap-2">
                                     {c.cars.map((car) => {
                                       const picked = selectedClient?.id === c.id && selectedCar?.id === car.id;
                                       return (
@@ -1566,14 +1585,14 @@ export function BookingJournalPage() {
                                             setSelectedCar(car);
                                             setConfirmError(null);
                                           }}
-                                          className={`rounded-lg border px-3 py-2 text-left text-[13px] font-medium ${
+                                          className={`rounded-lg px-3 py-2 text-left text-[13px] font-medium ${
                                             picked
-                                              ? "border-[#EC1C24] bg-[#FCE6E8] text-[#111826]"
-                                              : "border-[#E4E5E7] bg-white text-[#3B4656]"
+                                              ? "bg-[#EC1C24] text-white"
+                                              : "bg-white text-[#3B4656]"
                                           }`}
                                         >
                                           {car.model}
-                                          <span className="block text-[12px] font-normal text-[#6D788A]">
+                                          <span className={`block text-[12px] font-normal ${picked ? "text-white/90" : "text-[#6D788A]"}`}>
                                             {car.plate || "—"}
                                           </span>
                                         </button>
@@ -1590,35 +1609,36 @@ export function BookingJournalPage() {
                       ) : null}
 
                       {step1ClientMode === "new_form" ? (
-                        <div className="mt-5 space-y-3 rounded-[10px] border border-[#ECEEF1] bg-[#FAFAFA] p-4">
+                        <div className="mt-5 space-y-3">
                           <p className="text-[14px] font-semibold text-[#111826]">Новый клиент</p>
-                          <label className="block text-[13px] font-medium text-[#5A6472]">Имя</label>
                           <input
                             type="text"
-                            className="mt-1 w-full rounded-[10px] border-[2px] border-[#E4E5E7] bg-white px-3 py-2 text-[15px] outline-none"
+                            className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            placeholder="ФИО"
                             value={newClientName}
                             onChange={(e) => {
                               setNewClientName(e.target.value);
                               setConfirmError(null);
                             }}
                           />
-                          <label htmlFor="new-booking-new-client-phone" className="mt-2 block text-[13px] font-medium text-[#5A6472]">
-                            Телефон
-                          </label>
-                          <RuRequestsStylePhoneField
+                          <input
                             ref={newClientPhoneInputRef}
                             id="new-booking-new-client-phone"
-                            wrapperClassName="mt-1"
-                            nationalDigits={newClientPhoneDigits}
-                            onNationalDigitsChange={(d) => {
-                              setNewClientPhoneDigits(d);
+                            type="tel"
+                            autoComplete="tel"
+                            inputMode="numeric"
+                            value={maskRuPhoneInput(newClientPhoneDigits)}
+                            onChange={(e) => {
+                              setNewClientPhoneDigits(national10FromPhoneInput(e.target.value));
                               setConfirmError(null);
                             }}
+                            className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            placeholder="+7 (999) 000-00-00"
                           />
-                          <label className="mt-2 block text-[13px] font-medium text-[#5A6472]">Автомобиль</label>
                           <input
                             type="text"
-                            className="mt-1 w-full rounded-[10px] border-[2px] border-[#E4E5E7] bg-white px-3 py-2 text-[15px] outline-none"
+                            className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            placeholder="Автомобиль"
                             value={newClientCar}
                             onChange={(e) => {
                               setNewClientCar(e.target.value);
@@ -1632,26 +1652,57 @@ export function BookingJournalPage() {
 
                   {currentStep === 2 ? (
                     <>
-                      <label className="mt-5 block text-[14px] font-medium text-[#5A6472]">Услуга</label>
+                      <label className="mt-5 block text-[14px] font-medium text-[#5A6472]">Тип обращения</label>
                       <div className="relative mt-1.5">
-                        <select
-                          className={JOURNAL_MODAL_REQUESTS_LIKE_SELECT_CLASS}
-                          value={selectedService?.id ?? ""}
-                          onChange={(e) => {
-                            const s = JOURNAL_SERVICES.find((x) => x.id === e.target.value);
-                            setSelectedService(s ?? null);
-                            setConfirmError(null);
-                          }}
+                        <button
+                          type="button"
+                          className={`${JOURNAL_MODAL_REQUESTS_LIKE_SELECT_CLASS} text-left ${selectedService ? "text-black" : "text-[#9CA3AF]"}`}
+                          onClick={() => setIsServiceMenuOpen((v) => !v)}
                         >
-                          <option value="">Выберите услугу</option>
-                          {JOURNAL_SERVICES.map((s) => (
-                            <option key={s.id} value={s.id}>
-                              {s.name} ({s.duration} мин.)
-                            </option>
-                          ))}
-                        </select>
+                          <span className="block truncate">
+                            {selectedService ? `${selectedService.name} (${selectedService.duration} мин.)` : "Выберите тип обращения"}
+                          </span>
+                        </button>
                         <EditRequestModalSelectChevron />
+                        {isServiceMenuOpen ? (
+                          <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-[25] overflow-hidden rounded-[10px] border border-[#E4E5E7] bg-white shadow-[0_12px_24px_-12px_rgba(0,0,0,0.3)]">
+                            <ul className="service-menu-scroll max-h-[336px] overflow-y-auto py-1">
+                              <li>
+                                <button
+                                  type="button"
+                                  className="h-12 w-full cursor-default px-3 text-left text-[18px] font-medium tracking-[-0.04em] text-[#9CA3AF]"
+                                  disabled
+                                >
+                                  Выберите тип обращения
+                                </button>
+                              </li>
+                              {step2ScopedServices.map((s) => {
+                                const active = selectedService?.id === s.id;
+                                return (
+                                  <li key={s.id}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setSelectedService(s);
+                                        setConfirmError(null);
+                                        setIsServiceMenuOpen(false);
+                                      }}
+                                      className={`h-12 w-full px-3 text-left text-[18px] font-medium tracking-[-0.04em] ${
+                                        active ? "bg-[#FCE6E8] text-[#111826]" : "text-[#2E3642] hover:bg-[#F3F4F6]"
+                                      }`}
+                                    >
+                                      {s.name} ({s.duration} мин.)
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+                        ) : null}
                       </div>
+                      {step2ScopedServices.length === 0 ? (
+                        <p className="mt-2 text-[13px] text-[#6D788A]">Сейчас нет доступных типов обращения.</p>
+                      ) : null}
 
                       <label className="mt-4 block text-[14px] font-medium text-[#5A6472]">Дата</label>
                       <div className="relative mt-1.5">
@@ -1674,11 +1725,11 @@ export function BookingJournalPage() {
                   {currentStep === 3 ? (
                     <>
                       <p className="mt-5 text-[14px] font-semibold text-[#111826]">Свободные слоты</p>
-                      {availableSlots.length === 0 ? (
+                      {stepSlots.length === 0 ? (
                         <p className="mt-2 text-[14px] text-[#6D788A]">Нет доступных слотов на выбранную дату.</p>
                       ) : (
                         <ul className="mt-2 max-h-[220px] space-y-1.5 overflow-y-auto">
-                          {availableSlots.map((slot) => {
+                          {stepSlots.map((slot) => {
                             const active = selectedSlot !== null && slotKey(selectedSlot) === slotKey(slot);
                             return (
                               <li key={slotKey(slot)}>
@@ -1705,7 +1756,7 @@ export function BookingJournalPage() {
                   ) : null}
 
                   {currentStep === 4 ? (
-                    <div className="mt-5 space-y-3 rounded-[10px] border border-[#ECEEF1] bg-[#F9FAFB] p-4 text-[14px]">
+                    <div className="mt-5 space-y-3 rounded-[10px] bg-[#ECECEF] p-4 text-[14px]">
                       <div>
                         <span className="text-[12px] font-medium text-[#6D788A]">Клиент</span>
                         <p className="text-[16px] font-semibold text-[#111826]">
@@ -1714,7 +1765,7 @@ export function BookingJournalPage() {
                       </div>
                       <div>
                         <span className="text-[12px] font-medium text-[#6D788A]">Телефон</span>
-                        <p className="font-mono text-[16px] font-semibold text-[#111826]">
+                        <p className="text-[16px] font-semibold text-[#111826]">
                           {selectedClient?.phone ??
                             (newClientPhoneDigits.length === 10
                               ? displayRuPhoneComplete(newClientPhoneDigits)
@@ -1754,7 +1805,7 @@ export function BookingJournalPage() {
                     <button
                       type="button"
                       onClick={closeNewBookingModal}
-                      className="rounded-[10px] border border-[#E4E5E7] bg-white px-4 py-2.5 text-[14px] font-medium text-[#4D5766]"
+                      className="rounded-[10px] bg-[#ECECEF] px-4 py-2.5 text-[14px] font-medium text-black"
                     >
                       Отмена
                     </button>
@@ -1763,7 +1814,7 @@ export function BookingJournalPage() {
                         type="button"
                         disabled={currentStep === 1 && step1ClientMode === "phone"}
                         onClick={wizardBack}
-                        className="rounded-[10px] border border-[#E4E5E7] bg-white px-4 py-2.5 text-[14px] font-medium text-[#4D5766] disabled:cursor-not-allowed disabled:opacity-50"
+                        className="rounded-[10px] bg-[#ECECEF] px-4 py-2.5 text-[14px] font-medium text-black disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         Назад
                       </button>
@@ -1780,7 +1831,7 @@ export function BookingJournalPage() {
                       {currentStep === 2 ? (
                         <button
                           type="button"
-                          disabled={!selectedService || !selectedDate}
+                          disabled={!selectedService || !selectedDate || step2ScopedServices.length === 0}
                           onClick={wizardNextFromStep2}
                           className="rounded-[10px] bg-[#EC1C24] px-4 py-2.5 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
                         >
@@ -1790,7 +1841,7 @@ export function BookingJournalPage() {
                       {currentStep === 3 ? (
                         <button
                           type="button"
-                          disabled={!selectedSlot || availableSlots.length === 0}
+                          disabled={!selectedSlot || stepSlots.length === 0}
                           onClick={wizardNextFromStep3}
                           className="rounded-[10px] bg-[#EC1C24] px-4 py-2.5 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
                         >
@@ -1840,6 +1891,108 @@ export function BookingJournalPage() {
             document.body,
           )
         : null}
+      {assignModalBoxId && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[120] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => {
+                setAssignModalBoxId(null);
+                setAssignModalSelectedMasterId(null);
+              }}
+            >
+              <div
+                role="dialog"
+                aria-label={`Назначить мастера на ${assignModalBoxTitle}`}
+                className="w-full max-w-[440px] rounded-[14px] border border-[#E4E5E7] bg-white p-6 shadow-[0_24px_60px_-16px_rgba(0,0,0,0.35)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <h3 className="text-[20px] font-bold tracking-[-0.04em] text-[#111826]">Назначение мастера</h3>
+                <p className="mt-2 text-[14px] text-[#5A6472]">
+                  {assignModalBoxTitle} · {journalViewDate}
+                </p>
+                <div className="mt-4 max-h-[260px] space-y-2 overflow-y-auto">
+                  {availableMastersForViewDate.map((master) => {
+                    const active = assignModalSelectedMasterId === master.id;
+                    const takenByOtherBox = assignModalBoxId !== null
+                      && Object.entries(assignedMastersByDateBox).some(([key, assignedId]) => {
+                        if (!key.startsWith(`${journalViewDate}|`)) return false;
+                        const [, boxId] = key.split("|");
+                        return boxId !== assignModalBoxId && assignedId === master.id;
+                      });
+                    return (
+                      <button
+                        key={master.id}
+                        type="button"
+                        disabled={takenByOtherBox}
+                        onClick={() => {
+                          if (takenByOtherBox) return;
+                          setAssignModalSelectedMasterId(master.id);
+                        }}
+                        className={`flex w-full items-center gap-3 rounded-[10px] px-3 py-2.5 text-left text-[14px] font-medium ${
+                          active
+                            ? "bg-[#EC1C24] text-white"
+                            : takenByOtherBox
+                              ? "cursor-not-allowed bg-[#F3F3F5] text-black/40"
+                              : "bg-[#ECECEF] text-black"
+                        }`}
+                      >
+                        <span className={`inline-flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#F3F3F5] ${takenByOtherBox ? "opacity-40" : ""}`}>
+                          {master.photoUrl ? (
+                            <img src={master.photoUrl} alt={master.name} className="h-9 w-9 object-cover" />
+                          ) : (
+                            <span className="text-[11px] font-semibold text-[#6D788A]">М</span>
+                          )}
+                        </span>
+                        <span className="min-w-0 truncate">{master.name}</span>
+                      </button>
+                    );
+                  })}
+                  {availableMastersForViewDate.length === 0 ? (
+                    <p className="text-[14px] text-[#6D788A]">На эту дату нет мастеров по графику.</p>
+                  ) : null}
+                </div>
+                <div className="mt-6 flex items-center justify-between gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAssignModalBoxId(null);
+                      setAssignModalSelectedMasterId(null);
+                    }}
+                    className="rounded-[10px] bg-[#ECECEF] px-4 py-2.5 text-[14px] font-medium text-black"
+                  >
+                    Закрыть
+                  </button>
+                  <div className="ml-auto">
+                    <button
+                      type="button"
+                      disabled={!assignModalBoxId || !assignModalSelectedMasterId}
+                      onClick={() => {
+                        if (!assignModalBoxId || !assignModalSelectedMasterId) return;
+                      const takenByOtherBox = Object.entries(assignedMastersByDateBox).some(([key, assignedId]) => {
+                        if (!key.startsWith(`${journalViewDate}|`)) return false;
+                        const [, boxId] = key.split("|");
+                        return boxId !== assignModalBoxId && assignedId === assignModalSelectedMasterId;
+                      });
+                      if (takenByOtherBox) return;
+                        setAssignedMastersByDateBox((prev) => ({
+                          ...prev,
+                          [assignmentKey(journalViewDate, assignModalBoxId)]: assignModalSelectedMasterId,
+                        }));
+                        setAssignModalBoxId(null);
+                        setAssignModalSelectedMasterId(null);
+                      }}
+                    className="rounded-[10px] bg-[#EC1C24] px-4 py-2.5 text-[14px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Назначить
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       <style>
         {`
           @keyframes archiveToastIn {
@@ -1861,6 +2014,15 @@ export function BookingJournalPage() {
               opacity: 0;
               transform: translateY(8px) scale(0.98);
             }
+          }
+          .service-menu-scroll {
+            scrollbar-width: none;
+            -ms-overflow-style: none;
+          }
+          .service-menu-scroll::-webkit-scrollbar {
+            width: 0;
+            height: 0;
+            display: none;
           }
         `}
       </style>
