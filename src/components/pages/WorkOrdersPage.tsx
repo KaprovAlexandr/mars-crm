@@ -1,11 +1,16 @@
 import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
 import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
+import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import * as XLSX from "xlsx";
 
 type WorkOrderRow = {
   id: string;
+  archived?: boolean;
+  urgent?: boolean;
   client: string;
   car: string;
   plate: string;
@@ -15,6 +20,81 @@ type WorkOrderRow = {
   amount: string;
   dueDate: string;
 };
+
+type DateAcceptancePreset = "today" | "yesterday" | "last7" | "last30" | "custom";
+type WorkOrderActionId = "open" | "urgent" | "edit" | "archive";
+type WorkOrderActionEntry = { id: WorkOrderActionId; label: string; danger?: boolean };
+type EditWorkOrderDraft = {
+  client: string;
+  car: string;
+  plate: string;
+};
+const workOrderMasterOverrideStorageKey = "workOrderMasterOverrides";
+
+function exportWorkOrdersToXlsx(workOrders: WorkOrderRow[]) {
+  const data = workOrders.map((r) => ({
+    "№ заказ-наряда": r.id,
+    Статус: r.status,
+    Клиент: r.client,
+    Автомобиль: r.car,
+    "Гос. номер": r.plate,
+    Мастер: r.master,
+    "Дата приема": r.dueDate,
+    Сумма: r.amount,
+  }));
+  const ws = XLSX.utils.json_to_sheet(data);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Заказ-наряды");
+  XLSX.writeFile(wb, "заказ-наряды.xlsx");
+}
+
+function WorkOrderActionIconOpen({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path d="M8 4H4.75A1.75 1.75 0 0 0 3 5.75v9.5A1.75 1.75 0 0 0 4.75 17h9.5A1.75 1.75 0 0 0 16 15.25V12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M11 4h5v5M16 4l-7 7" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function WorkOrderActionIconUrgent({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path d="M10 3l1.9 3.84L16 7.43l-3 2.92.7 4.15L10 12.67 6.3 14.5l.7-4.15-3-2.92 4.1-.59L10 3z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function WorkOrderActionIconEdit({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path d="M3.75 16.25h3.1l8.25-8.25-3.1-3.1-8.25 8.25v3.1z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+      <path d="M10.8 6.2l3.1 3.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function WorkOrderActionIconArchive({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path d="M3 6.5h14M5 6.5v9.25A1.25 1.25 0 0 0 6.25 17h7.5A1.25 1.25 0 0 0 15 15.75V6.5M7.5 6.5V4.75A1.75 1.75 0 0 1 9.25 3h1.5A1.75 1.75 0 0 1 12.5 4.75V6.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function formatRuDateFromDate(date: Date): string {
+  const dd = String(date.getDate()).padStart(2, "0");
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const yyyy = date.getFullYear();
+  return `${dd}.${mm}.${yyyy}`;
+}
+
+function maskRuDateInput(input: string): string {
+  const digits = input.replace(/\D/g, "").slice(0, 8);
+  if (digits.length <= 2) return digits;
+  if (digits.length <= 4) return `${digits.slice(0, 2)}.${digits.slice(2)}`;
+  return `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
+}
 
 const workOrderStatusColorMap: Record<WorkOrderRow["status"], string> = {
   Новый: "#ACACAC",
@@ -26,42 +106,40 @@ const workOrderStatusColorMap: Record<WorkOrderRow["status"], string> = {
 };
 
 const workOrderRows: WorkOrderRow[] = [
-  { id: "294894", client: "Иванов Артём Сергеевич", car: "BMW M5 F90", plate: "А123ВС777", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "18 500 ₽", dueDate: "03.08.2024" },
-  { id: "593423", client: "Смирнова Наталья Викторовна", car: "Kia Rio", plate: "М456КХ199", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Новый", amount: "12 300 ₽", dueDate: "05.08.2024" },
-  { id: "839022", client: 'ООО "Сад"', car: "Lada Priora", plate: "О789ЕН750", master: "Кириллов О.", masterPhoto: "https://i.pravatar.cc/80?img=14", status: "Ожидание запчастей", amount: "25 800 ₽", dueDate: "08.08.2024" },
-  { id: "847952", client: "ИП Лебедев Максим Олегович", car: "Toyota Camry", plate: "Т321ОР197", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "В работе", amount: "9 700 ₽", dueDate: "13.08.2024" },
-  { id: "495783", client: 'ООО "ЭкоМобил"', car: "Skoda Octavia", plate: "У654НС777", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Закрыт", amount: "31 400 ₽", dueDate: "15.08.2024" },
-  { id: "987384", client: "Белов Алексей Игоревич", car: "Hyundai Solaris", plate: "В222ОО177", master: "Романова Л.", masterPhoto: "https://i.pravatar.cc/80?img=5", status: "Новый", amount: "7 200 ₽", dueDate: "17.08.2024" },
-  { id: "284750", client: "Фролова Алина Андреевна", car: "Renault Duster", plate: "Р988РР799", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "В работе", amount: "14 900 ₽", dueDate: "20.08.2024" },
-  { id: "847597", client: "Журавлёв Михаил Дмитриевич", car: "VW Polo", plate: "С555КК77", master: "Кузнецов Е.", masterPhoto: "https://i.pravatar.cc/80?img=52", status: "Закрыт", amount: "22 000 ₽", dueDate: "22.08.2024" },
-  { id: "658472", client: 'ООО "ГрузСервис"', car: "MAN TGS", plate: "Е100ХХ750", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "56 700 ₽", dueDate: "24.08.2024" },
-  { id: "309845", client: 'ООО "ТехноТрак"', car: "Mercedes Actros", plate: "Н777АА116", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Готово", amount: "43 900 ₽", dueDate: "26.08.2024" },
-  { id: "208476", client: "Гаврилова Ирина Михайловна", car: "Mazda 6", plate: "У001УР199", master: "Захарова И.", masterPhoto: "https://i.pravatar.cc/80?img=58", status: "Ожидание запчастей", amount: "17 600 ₽", dueDate: "28.08.2024" },
-  { id: "989923", client: 'ООО "ЭкспрессТранс"', car: "Ford Transit", plate: "Р454КХ799", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Закрыт", amount: "28 300 ₽", dueDate: "30.08.2024" },
-  { id: "923117", client: "Кузнецов Павел Андреевич", car: "Nissan X-Trail", plate: "Х878ТТ177", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "19 400 ₽", dueDate: "01.09.2024" },
-  { id: "731550", client: 'ООО "Магистраль"', car: "Scania R450", plate: "М320СС97", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "Отказ клиента", amount: "63 200 ₽", dueDate: "03.09.2024" },
-  { id: "615004", client: "Орлова Анна Вячеславовна", car: "Kia Sportage", plate: "Р600РО177", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "Закрыт", amount: "11 800 ₽", dueDate: "05.09.2024" },
-  { id: "771208", client: "Савельев Кирилл Романович", car: "Audi A6", plate: "А701АА77", master: "Кузнецов Е.", masterPhoto: "https://i.pravatar.cc/80?img=52", status: "В работе", amount: "35 100 ₽", dueDate: "06.09.2024" },
-  { id: "842661", client: "Павлова Ольга Дмитриевна", car: "Skoda Kodiaq", plate: "Н442НР799", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Ожидание запчастей", amount: "21 500 ₽", dueDate: "07.09.2024" },
-  { id: "904552", client: 'ООО "ЛогистикПлюс"', car: "DAF XF", plate: "Р909РЕ750", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Готово", amount: "47 000 ₽", dueDate: "08.09.2024" },
-  { id: "956740", client: "Тихонов Максим Сергеевич", car: "BMW X5", plate: "Е212ЕР199", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "39 600 ₽", dueDate: "09.09.2024" },
-  { id: "118390", client: "Егорова Мария Игоревна", car: "Toyota RAV4", plate: "К811КК777", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "Закрыт", amount: "13 200 ₽", dueDate: "10.09.2024" },
+  { id: "294894", client: "Иванов Артём Сергеевич", car: "BMW M5 F90", plate: "А123ВС777", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "18 500 ₽", dueDate: "02.04.2026" },
+  { id: "593423", client: "Смирнова Наталья Викторовна", car: "Kia Rio", plate: "М456КХ199", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Новый", amount: "12 300 ₽", dueDate: "04.04.2026" },
+  { id: "839022", client: 'ООО "Сад"', car: "Lada Priora", plate: "О789ЕН750", master: "Кириллов О.", masterPhoto: "https://i.pravatar.cc/80?img=14", status: "Ожидание запчастей", amount: "25 800 ₽", dueDate: "06.04.2026" },
+  { id: "847952", client: "ИП Лебедев Максим Олегович", car: "Toyota Camry", plate: "Т321ОР197", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "В работе", amount: "9 700 ₽", dueDate: "08.04.2026" },
+  { id: "495783", client: 'ООО "ЭкоМобил"', car: "Skoda Octavia", plate: "У654НС777", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Закрыт", amount: "31 400 ₽", dueDate: "10.04.2026" },
+  { id: "987384", client: "Белов Алексей Игоревич", car: "Hyundai Solaris", plate: "В222ОО177", master: "Романова Л.", masterPhoto: "https://i.pravatar.cc/80?img=5", status: "Новый", amount: "7 200 ₽", dueDate: "12.04.2026" },
+  { id: "284750", client: "Фролова Алина Андреевна", car: "Renault Duster", plate: "Р988РР799", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "В работе", amount: "14 900 ₽", dueDate: "14.04.2026" },
+  { id: "847597", client: "Журавлёв Михаил Дмитриевич", car: "VW Polo", plate: "С555КК77", master: "Кузнецов Е.", masterPhoto: "https://i.pravatar.cc/80?img=52", status: "Закрыт", amount: "22 000 ₽", dueDate: "16.04.2026" },
+  { id: "658472", client: 'ООО "ГрузСервис"', car: "MAN TGS", plate: "Е100ХХ750", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "56 700 ₽", dueDate: "18.04.2026" },
+  { id: "309845", client: 'ООО "ТехноТрак"', car: "Mercedes Actros", plate: "Н777АА116", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Готово", amount: "43 900 ₽", dueDate: "20.04.2026" },
+  { id: "208476", client: "Гаврилова Ирина Михайловна", car: "Mazda 6", plate: "У001УР199", master: "Захарова И.", masterPhoto: "https://i.pravatar.cc/80?img=58", status: "Ожидание запчастей", amount: "17 600 ₽", dueDate: "22.04.2026" },
+  { id: "989923", client: 'ООО "ЭкспрессТранс"', car: "Ford Transit", plate: "Р454КХ799", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Закрыт", amount: "28 300 ₽", dueDate: "24.04.2026" },
+  { id: "923117", client: "Кузнецов Павел Андреевич", car: "Nissan X-Trail", plate: "Х878ТТ177", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "19 400 ₽", dueDate: "26.04.2026" },
+  { id: "731550", client: 'ООО "Магистраль"', car: "Scania R450", plate: "М320СС97", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "Отказ клиента", amount: "63 200 ₽", dueDate: "28.04.2026" },
+  { id: "615004", client: "Орлова Анна Вячеславовна", car: "Kia Sportage", plate: "Р600РО177", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "Закрыт", amount: "11 800 ₽", dueDate: "30.04.2026" },
+  { id: "771208", client: "Савельев Кирилл Романович", car: "Audi A6", plate: "А701АА77", master: "Кузнецов Е.", masterPhoto: "https://i.pravatar.cc/80?img=52", status: "В работе", amount: "35 100 ₽", dueDate: "02.05.2026" },
+  { id: "842661", client: "Павлова Ольга Дмитриевна", car: "Skoda Kodiaq", plate: "Н442НР799", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Ожидание запчастей", amount: "21 500 ₽", dueDate: "03.05.2026" },
+  { id: "904552", client: 'ООО "ЛогистикПлюс"', car: "DAF XF", plate: "Р909РЕ750", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Готово", amount: "47 000 ₽", dueDate: "04.05.2026" },
+  { id: "956740", client: "Тихонов Максим Сергеевич", car: "BMW X5", plate: "Е212ЕР199", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "39 600 ₽", dueDate: "05.05.2026" },
+  { id: "118390", client: "Егорова Мария Игоревна", car: "Toyota RAV4", plate: "К811КК777", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "Закрыт", amount: "13 200 ₽", dueDate: "06.05.2026" },
+  { id: "552701", client: "Киселёв Андрей Петрович", car: "BMW 320i", plate: "В777ВВ799", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "В работе", amount: "16 800 ₽", dueDate: "07.05.2026" },
+  { id: "552702", client: "Лаврова Дарья Олеговна", car: "Skoda Rapid", plate: "Р333РР799", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "Закрыт", amount: "11 400 ₽", dueDate: "05.05.2026" },
 ];
-
-function shiftRuDate(dateString: string, daysDelta: number): string {
-  const match = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(dateString.trim());
-  if (!match) return dateString;
-  const day = Number(match[1]);
-  const month = Number(match[2]) - 1;
-  const year = Number(match[3]);
-  const date = new Date(year, month, day);
-  if (Number.isNaN(date.getTime())) return dateString;
-  date.setDate(date.getDate() + daysDelta);
-  const dd = String(date.getDate()).padStart(2, "0");
-  const mm = String(date.getMonth() + 1).padStart(2, "0");
-  const yy = date.getFullYear();
-  return `${dd}.${mm}.${yy}`;
-}
+const masterPhotoByName: Record<string, string> = {
+  "Алексеев Д.": "https://i.pravatar.cc/80?img=12",
+  "Семёнова Е.": "https://i.pravatar.cc/80?img=32",
+  "Кириллов О.": "https://i.pravatar.cc/80?img=14",
+  "Гусева М.": "https://i.pravatar.cc/80?img=25",
+  "Тимофеев А.": "https://i.pravatar.cc/80?img=47",
+  "Романова Л.": "https://i.pravatar.cc/80?img=5",
+  "Журавлёв М.": "https://i.pravatar.cc/80?img=41",
+  "Кузнецов Е.": "https://i.pravatar.cc/80?img=52",
+  "Захарова И.": "https://i.pravatar.cc/80?img=58",
+};
 
 export function WorkOrdersPage() {
   const navigate = useNavigate();
@@ -70,9 +148,34 @@ export function WorkOrdersPage() {
   const highlightWorkOrderId = searchParams.get("workOrder");
   const workOrderRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
   const workOrderScrollKey = useRef<string>("");
-  const [rows] = useState<WorkOrderRow[]>(() => workOrderRows.map((r) => ({ ...r })));
+  const [rows, setRows] = useState<WorkOrderRow[]>(() => {
+    let overrides: Record<string, string> = {};
+    if (typeof window !== "undefined") {
+      const raw = window.localStorage.getItem(workOrderMasterOverrideStorageKey);
+      if (raw) {
+        try {
+          overrides = JSON.parse(raw) as Record<string, string>;
+        } catch {
+          overrides = {};
+        }
+      }
+    }
+    return workOrderRows.map((r) => {
+      const master = overrides[r.id] ?? r.master;
+      return {
+        ...r,
+        master,
+        masterPhoto: masterPhotoByName[master] ?? r.masterPhoto,
+        urgent: false,
+        archived: false,
+      };
+    });
+  });
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
+  const [workOrderActionsModal, setWorkOrderActionsModal] = useState<WorkOrderRow | null>(null);
+  const [editWorkOrderId, setEditWorkOrderId] = useState<string | null>(null);
+  const [editWorkOrderDraft, setEditWorkOrderDraft] = useState<EditWorkOrderDraft | null>(null);
   const [openFilter, setOpenFilter] = useState<"status" | "master" | "dueDate" | null>(null);
   const [statusFilter, setStatusFilter] = useState<Set<WorkOrderRow["status"]>>(
     () => new Set(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"]),
@@ -80,12 +183,13 @@ export function WorkOrdersPage() {
   const [masterFilter, setMasterFilter] = useState<Set<string>>(
     () => new Set([...new Set(workOrderRows.map((r) => r.master))]),
   );
+  const [datePreset, setDatePreset] = useState<DateAcceptancePreset | null>(null);
   const [dateFromInput, setDateFromInput] = useState("");
   const [dateToInput, setDateToInput] = useState("");
   const [awaitingPaymentOnly, setAwaitingPaymentOnly] = useState(false);
   const [archiveOnly, setArchiveOnly] = useState(false);
+  const [delayOnly, setDelayOnly] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const [paginationWindowStart, setPaginationWindowStart] = useState<1 | 4>(1);
   const [sortState, setSortState] = useState<
     | { key: "id" | "status" | "client" | "car" | "plate" | "master" | "dueDate" | "amount"; dir: "asc" | "desc" }
     | null
@@ -102,69 +206,59 @@ export function WorkOrdersPage() {
     return dt;
   }
 
-  useLayoutEffect(() => {
-    const wid = searchParams.get("workOrder");
-    if (!wid) {
-      workOrderScrollKey.current = "";
-      return;
-    }
-    if (!rows.some((r) => r.id === wid)) {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete("workOrder");
-          return next;
-        },
-        { replace: true },
-      );
-      workOrderScrollKey.current = "";
-      return;
-    }
-    if (workOrderScrollKey.current === wid) return;
-    workOrderScrollKey.current = wid;
-    const raf = window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        workOrderRowRefs.current[wid]?.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
-    });
-    const tid = window.setTimeout(() => {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete("workOrder");
-          return next;
-        },
-        { replace: true },
-      );
-      workOrderScrollKey.current = "";
-    }, 9000);
-    return () => {
-      window.cancelAnimationFrame(raf);
-      window.clearTimeout(tid);
-    };
-  }, [searchParams, rows, setSearchParams]);
+  function isDelayedWorkOrder(row: WorkOrderRow, now: Date): boolean {
+    if (row.status !== "В работе" && row.status !== "Новый") return false;
+    const acceptedAt = parseRuDate(row.dueDate);
+    if (!acceptedAt) return false;
+    const delayedFromMs = acceptedAt.getTime() + 24 * 60 * 60 * 1000;
+    return now.getTime() >= delayedFromMs;
+  }
 
-  const TOTAL_WORK_ORDERS_SHOWN = 127;
+  useEffect(() => {
+    if (!workOrderActionsModal) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setWorkOrderActionsModal(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [workOrderActionsModal]);
+
+  useEffect(() => {
+    if (!editWorkOrderId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setEditWorkOrderId(null);
+        setEditWorkOrderDraft(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [editWorkOrderId]);
+
   const PAGE_SIZE = 12;
-  const PAGINATION_TOTAL_PAGES = 7;
 
   const displayRows = useMemo(() => {
     const qText = searchQuery.trim().toLowerCase();
     const qDigits = searchQuery.replace(/\D/g, "");
     const fromD = parseRuDate(dateFromInput);
     const toD = parseRuDate(dateToInput);
+    const now = new Date();
     const fromBound = fromD ? new Date(fromD.getFullYear(), fromD.getMonth(), fromD.getDate()) : null;
     const toBound = toD ? new Date(toD.getFullYear(), toD.getMonth(), toD.getDate(), 23, 59, 59, 999) : null;
 
     return rows.filter((row) => {
       if (qText) {
         const byClient = row.client.toLowerCase().includes(qText);
-        const byCar = row.car.toLowerCase().includes(qText);
         const byId = row.id.includes(qDigits);
-        if (!byClient && !byCar && !byId) return false;
+        if (!byClient && !byId) return false;
+      }
+      if (archiveOnly) {
+        if (!row.archived) return false;
+      } else if (row.archived) {
+        return false;
       }
       if (awaitingPaymentOnly && row.status !== "Готово") return false;
-      if (archiveOnly && row.status !== "Закрыт" && row.status !== "Отказ клиента") return false;
+      if (delayOnly && !isDelayedWorkOrder(row, now)) return false;
       if (!statusFilter.has(row.status)) return false;
       if (!masterFilter.has(row.master)) return false;
       const rowDate = parseRuDate(row.dueDate);
@@ -172,7 +266,7 @@ export function WorkOrdersPage() {
       if (toBound && (!rowDate || rowDate > toBound)) return false;
       return true;
     });
-  }, [rows, searchQuery, awaitingPaymentOnly, archiveOnly, statusFilter, masterFilter, dateFromInput, dateToInput]);
+  }, [rows, searchQuery, awaitingPaymentOnly, archiveOnly, delayOnly, statusFilter, masterFilter, dateFromInput, dateToInput]);
 
   const sortedRows = useMemo(() => {
     if (!sortState) return displayRows;
@@ -204,25 +298,68 @@ export function WorkOrdersPage() {
     return `${n} ${word}`;
   }, [rows.length]);
 
-  const totalPages = PAGINATION_TOTAL_PAGES;
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / PAGE_SIZE));
   const currentPageSafe = Math.min(currentPage, totalPages);
   const pageStart = (currentPageSafe - 1) * PAGE_SIZE;
   const pagedRows = sortedRows.slice(pageStart, pageStart + PAGE_SIZE);
   const pageEnd = Math.min(pageStart + pagedRows.length, sortedRows.length);
-  const paginationItems: Array<number | "ellipsis"> = [paginationWindowStart, paginationWindowStart + 1, paginationWindowStart + 2, "ellipsis", totalPages];
-  const paginationActiveIndex =
-    currentPageSafe === totalPages ? 4 : currentPageSafe >= paginationWindowStart && currentPageSafe <= paginationWindowStart + 2 ? currentPageSafe - paginationWindowStart : 0;
+  const paginationItems: Array<number | "ellipsis"> =
+    totalPages <= 5
+      ? Array.from({ length: totalPages }, (_, idx) => idx + 1)
+      : [1, 2, 3, "ellipsis", totalPages];
+  const paginationActiveIndex = Math.max(
+    0,
+    paginationItems.findIndex((item) => item === currentPageSafe),
+  );
   const allPageRowsSelected = pagedRows.length > 0 && pagedRows.every((r) => selectedRowIds.has(r.id));
   const awaitingPaymentCount = rows.filter((r) => r.status === "Готово").length;
-  const archiveCount = rows.filter((r) => r.status === "Закрыт" || r.status === "Отказ клиента").length;
+  const archiveCount = rows.filter((r) => Boolean(r.archived)).length;
+  const delayCount = rows.filter((r) => isDelayedWorkOrder(r, new Date())).length;
+
+  useLayoutEffect(() => {
+    const wid = searchParams.get("workOrder");
+    if (!wid) {
+      workOrderScrollKey.current = "";
+      return;
+    }
+    const targetIndex = sortedRows.findIndex((r) => r.id === wid);
+    if (targetIndex === -1) {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("workOrder");
+          return next;
+        },
+        { replace: true },
+      );
+      workOrderScrollKey.current = "";
+      return;
+    }
+    if (workOrderScrollKey.current === wid) return;
+    workOrderScrollKey.current = wid;
+    const targetPage = Math.floor(targetIndex / PAGE_SIZE) + 1;
+    if (currentPage !== targetPage) {
+      setCurrentPage(targetPage);
+    }
+    const tid = window.setTimeout(() => {
+      setSearchParams(
+        (prev) => {
+          const next = new URLSearchParams(prev);
+          next.delete("workOrder");
+          return next;
+        },
+        { replace: true },
+      );
+      workOrderScrollKey.current = "";
+    }, 4000);
+    return () => {
+      window.clearTimeout(tid);
+    };
+  }, [searchParams, sortedRows, setSearchParams, currentPage]);
 
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages);
   }, [currentPage, totalPages]);
-
-  useEffect(() => {
-    setPaginationWindowStart(currentPageSafe >= 4 ? 4 : 1);
-  }, [currentPageSafe]);
 
   function toggleSort(key: "id" | "status" | "client" | "car" | "plate" | "master" | "dueDate" | "amount") {
     setSortState((prev) => {
@@ -260,12 +397,46 @@ export function WorkOrdersPage() {
     setSearchQuery("");
     setAwaitingPaymentOnly(false);
     setArchiveOnly(false);
+    setDelayOnly(false);
     setSelectedRowIds(new Set());
     setOpenFilter(null);
     setStatusFilter(new Set(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"]));
     setMasterFilter(new Set([...new Set(workOrderRows.map((r) => r.master))]));
+    setDatePreset(null);
     setDateFromInput("");
     setDateToInput("");
+  }
+
+  function applyPresetToDateInputs(preset: Exclude<DateAcceptancePreset, "custom">) {
+    const now = new Date();
+    const end = formatRuDateFromDate(now);
+    if (preset === "today") {
+      setDateFromInput(end);
+      setDateToInput(end);
+    } else if (preset === "yesterday") {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 1);
+      const day = formatRuDateFromDate(d);
+      setDateFromInput(day);
+      setDateToInput(day);
+    } else if (preset === "last7") {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 6);
+      setDateFromInput(formatRuDateFromDate(d));
+      setDateToInput(end);
+    } else {
+      const d = new Date(now);
+      d.setDate(d.getDate() - 29);
+      setDateFromInput(formatRuDateFromDate(d));
+      setDateToInput(end);
+    }
+    setDatePreset(preset);
+  }
+
+  function filterChipActive(id: "status" | "master" | "dueDate"): boolean {
+    if (openFilter === id) return true;
+    if (id === "dueDate" && (datePreset !== null || dateFromInput.trim() !== "" || dateToInput.trim() !== "")) return true;
+    return false;
   }
 
   const panelBase = "absolute left-0 top-full z-30 mt-2 min-w-[240px] rounded-[10px] border border-[#DDE1E7] bg-white p-3 shadow-lg";
@@ -283,7 +454,87 @@ export function WorkOrdersPage() {
     return <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border-[2px] border-[#D8DBDE]" />;
   }
 
-  const noActiveFilters = !searchQuery.trim() && !awaitingPaymentOnly && !archiveOnly && !dateFromInput.trim() && !dateToInput.trim();
+  const workOrderModalActions: WorkOrderActionEntry[] = useMemo(() => {
+    if (!workOrderActionsModal) return [];
+    const current = rows.find((r) => r.id === workOrderActionsModal.id) ?? workOrderActionsModal;
+    return [
+      { id: "open", label: "Открыть заказ-наряд" },
+      { id: "urgent", label: current.urgent ? "Убрать срочность" : "Сделать срочным" },
+      { id: "edit", label: "Редактировать" },
+      { id: "archive", label: "Переместить в архив", danger: true },
+    ];
+  }, [workOrderActionsModal, rows]);
+
+  function actionIconById(actionId: WorkOrderActionId, danger?: boolean) {
+    const tone = danger ? "text-[#EC1C24]" : "text-[#4B5563]";
+    if (actionId === "open") return <WorkOrderActionIconOpen className={tone} />;
+    if (actionId === "urgent") return <WorkOrderActionIconUrgent className={tone} />;
+    if (actionId === "edit") return <WorkOrderActionIconEdit className={tone} />;
+    return <WorkOrderActionIconArchive className={tone} />;
+  }
+
+  function handleWorkOrderModalAction(actionId: WorkOrderActionId) {
+    if (!workOrderActionsModal) return;
+    if (actionId === "open") {
+      setWorkOrderActionsModal(null);
+      return;
+    }
+    if (actionId === "urgent") {
+      setRows((prev) =>
+        prev.map((row) =>
+          row.id === workOrderActionsModal.id ? { ...row, urgent: !row.urgent } : row,
+        ),
+      );
+    }
+    if (actionId === "archive") {
+      const archivedRowId = workOrderActionsModal.id;
+      const archivedClient = workOrderActionsModal.client;
+      setRows((prev) =>
+        prev.map((row) =>
+          row.id === archivedRowId ? { ...row, archived: true } : row,
+        ),
+      );
+      setSelectedRowIds((prev) => {
+        const next = new Set(prev);
+        next.delete(archivedRowId);
+        return next;
+      });
+      emitArchiveStyleToast({
+        line1: `Заказ-наряд № ${archivedRowId} (${archivedClient})`,
+        line2: "перемещен в архив",
+      });
+    }
+    if (actionId === "edit") {
+      const rowToEdit = rows.find((row) => row.id === workOrderActionsModal.id) ?? workOrderActionsModal;
+      setEditWorkOrderId(rowToEdit.id);
+      setEditWorkOrderDraft({
+        client: rowToEdit.client,
+        car: rowToEdit.car,
+        plate: rowToEdit.plate,
+      });
+    }
+    setWorkOrderActionsModal(null);
+  }
+
+  function commitWorkOrderEdit() {
+    if (!editWorkOrderId || !editWorkOrderDraft) return;
+    setRows((prev) =>
+      prev.map((row) =>
+        row.id === editWorkOrderId
+          ? {
+              ...row,
+              client: editWorkOrderDraft.client.trim() || row.client,
+              car: editWorkOrderDraft.car.trim() || row.car,
+              plate: editWorkOrderDraft.plate.trim() || row.plate,
+            }
+          : row,
+      ),
+    );
+    setEditWorkOrderId(null);
+    setEditWorkOrderDraft(null);
+  }
+
+  const noActiveFilters = !searchQuery.trim() && !awaitingPaymentOnly && !archiveOnly && !delayOnly && !dateFromInput.trim() && !dateToInput.trim();
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-black">
@@ -322,17 +573,39 @@ export function WorkOrdersPage() {
                   <span className="text-[16px] font-medium tracking-[-0.04em] text-[#B4B4B6]">{workOrdersCountLabel}</span>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-[#8A8A8A] outline-none placeholder:text-[#B5B5B5]"
-                    placeholder="Найти по номеру заказ-наряда..."
-                  />
+                  <div className="relative">
+                    <input
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-[#8A8A8A] outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      placeholder="Поиск по ID или ФИО..."
+                      aria-label="Поиск по ID или ФИО..."
+                    />
+                    {searchQuery.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        aria-label="Очистить поиск"
+                        className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] text-[#7D7D7D] transition-colors hover:bg-black/5 hover:text-black"
+                      >
+                        <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
+                          <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     className="h-12 rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
                   >
                     Создать заказ-наряд
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => exportWorkOrdersToXlsx(noActiveFilters ? rows : sortedRows)}
+                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out"
+                  >
+                    Экспорт в Excel
                   </button>
                 </div>
               </div>
@@ -351,17 +624,23 @@ export function WorkOrdersPage() {
                         type="button"
                         onClick={() => setOpenFilter((prev) => (prev === id ? null : id))}
                         className={`cursor-pointer rounded-[10px] px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] ${
-                          openFilter === id ? "bg-[#EC1C24] text-white" : "bg-[#ECECEF] text-[#111111]"
+                          filterChipActive(id) ? "bg-[#EC1C24] text-white" : "bg-[#ECECEF] text-[#111111]"
                         }`}
                       >
                         <span className="flex items-center justify-center gap-[12px]">
                           <span>{label}</span>
-                          <svg viewBox="0 0 16 16" fill="none" className={`h-[16px] w-[16px] ${openFilter === id ? "text-white" : "text-[#111111]"}`}>
+                          <svg
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            className={`h-[16px] w-[16px] transition-transform duration-500 ease-[cubic-bezier(0.16,1,0.3,1)] ${
+                              filterChipActive(id) ? "text-white" : "text-[#111111]"
+                            } ${openFilter === id ? "rotate-180" : "rotate-0"}`}
+                          >
                             <path d="M3 6L8 11L13 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
                           </svg>
                         </span>
                       </button>
-                      {openFilter === "status" && (
+                      {id === "status" && openFilter === "status" && (
                         <div className={panelBase}>
                           <p className="mb-2 text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">Статус</p>
                           {(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"] as const).map((s) => (
@@ -383,7 +662,7 @@ export function WorkOrdersPage() {
                           ))}
                         </div>
                       )}
-                      {openFilter === "master" && (
+                      {id === "master" && openFilter === "master" && (
                         <div className={panelBase}>
                           <p className="mb-2 text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">Мастер</p>
                           {[...new Set(rows.map((r) => r.master))].map((m) => (
@@ -405,26 +684,117 @@ export function WorkOrdersPage() {
                           ))}
                         </div>
                       )}
-                      {openFilter === "dueDate" && (
+                      {id === "dueDate" && openFilter === "dueDate" && (
                         <div className={panelBase}>
                           <p className="mb-2 text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">Дата приема</p>
-                          <div className="flex flex-col gap-2">
-                            <label className="text-[13px] text-[#7D7D7D]">С</label>
-                            <input value={dateFromInput} onChange={(e) => setDateFromInput(e.target.value)} className="h-10 rounded-[8px] border border-[#E4E5E7] bg-white px-2 text-[15px] outline-none" placeholder="дд.мм.гггг" />
-                            <label className="text-[13px] text-[#7D7D7D]">По</label>
-                            <input value={dateToInput} onChange={(e) => setDateToInput(e.target.value)} className="h-10 rounded-[8px] border border-[#E4E5E7] bg-white px-2 text-[15px] outline-none" placeholder="дд.мм.гггг" />
+                          <div className="flex flex-col gap-0.5">
+                            {(
+                              [
+                                ["today", "Сегодня"],
+                                ["yesterday", "Вчера"],
+                                ["last7", "Последние 7 дней"],
+                                ["last30", "Последние 30 дней"],
+                              ] as const
+                            ).map(([preset, label]) => (
+                              <span
+                                key={preset}
+                                className={`flex cursor-pointer items-center gap-2 rounded-[8px] py-1.5 text-[15px] font-medium tracking-[-0.04em] text-[#111111] ${
+                                  datePreset === preset ? "bg-white" : ""
+                                }`}
+                                onClick={() => applyPresetToDateInputs(preset)}
+                                role="checkbox"
+                                aria-checked={datePreset === preset}
+                              >
+                                {checkboxBox(datePreset === preset)}
+                                {label}
+                              </span>
+                            ))}
+                            <span
+                              className={`flex cursor-pointer items-center gap-2 rounded-[8px] py-1.5 text-[15px] font-medium tracking-[-0.04em] text-[#111111] ${
+                                datePreset === "custom" ? "bg-white" : ""
+                              }`}
+                              onClick={() => {
+                                setDatePreset("custom");
+                                setDateFromInput("");
+                                setDateToInput("");
+                              }}
+                              role="checkbox"
+                              aria-checked={datePreset === "custom"}
+                            >
+                              {checkboxBox(datePreset === "custom")}
+                              Свой диапазон
+                            </span>
                           </div>
+                          {datePreset === "custom" ? (
+                            <div className="mt-3 flex flex-col gap-2 border-t border-[#DDE1E7] pt-3">
+                              <label className="text-[13px] text-[#7D7D7D]">С</label>
+                              <input
+                                value={dateFromInput}
+                                onChange={(e) => {
+                                  setDateFromInput(maskRuDateInput(e.target.value));
+                                  setDatePreset("custom");
+                                }}
+                                className="h-10 rounded-[8px] border border-[#E4E5E7] bg-white px-2 text-[15px] outline-none"
+                                placeholder="дд.мм.гггг"
+                              />
+                              <label className="text-[13px] text-[#7D7D7D]">По</label>
+                              <input
+                                value={dateToInput}
+                                onChange={(e) => {
+                                  setDateToInput(maskRuDateInput(e.target.value));
+                                  setDatePreset("custom");
+                                }}
+                                className="h-10 rounded-[8px] border border-[#E4E5E7] bg-white px-2 text-[15px] outline-none"
+                                placeholder="дд.мм.гггг"
+                              />
+                            </div>
+                          ) : null}
                         </div>
                       )}
                     </div>
                   ))}
                   <div className="flex flex-wrap items-center gap-6 pl-1 sm:pl-3">
-                    <span className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]" onClick={() => setAwaitingPaymentOnly((v) => !v)}>
+                    <span
+                      className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]"
+                      onClick={() => {
+                        setDelayOnly((v) => {
+                          const next = !v;
+                          setAwaitingPaymentOnly(false);
+                          setArchiveOnly(false);
+                          return next;
+                        });
+                      }}
+                    >
+                      {checkboxBox(delayOnly)}
+                      <span className="text-black">Задержка </span>
+                      <span className="text-[#7D7D7D] tabular-nums">({delayCount})</span>
+                    </span>
+                    <span
+                      className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]"
+                      onClick={() => {
+                        setAwaitingPaymentOnly((v) => {
+                          const next = !v;
+                          setDelayOnly(false);
+                          setArchiveOnly(false);
+                          return next;
+                        });
+                      }}
+                    >
                       {checkboxBox(awaitingPaymentOnly)}
                       <span className="text-black">Готово к выдаче </span>
                       <span className="text-[#7D7D7D] tabular-nums">({awaitingPaymentCount})</span>
                     </span>
-                    <span className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]" onClick={() => setArchiveOnly((v) => !v)}>
+                    <span
+                      className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]"
+                      onClick={() => {
+                        setArchiveOnly((v) => {
+                          const next = !v;
+                          setDelayOnly(false);
+                          setAwaitingPaymentOnly(false);
+                          return next;
+                        });
+                      }}
+                    >
                       {checkboxBox(archiveOnly)}
                       <span className="text-black">Архив </span>
                       <span className="text-[#7D7D7D] tabular-nums">({archiveCount})</span>
@@ -435,55 +805,62 @@ export function WorkOrdersPage() {
                   type="button"
                   onClick={resetFilters}
                   disabled={noActiveFilters}
-                  className="inline-flex shrink-0 cursor-pointer items-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border disabled:cursor-default disabled:border-[#D0D2D7] disabled:text-[#A5A8B1]"
+                  className="inline-flex shrink-0 cursor-pointer items-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border"
                 >
                   Сбросить фильтры
                 </button>
               </div>
 
               <div className="min-h-0 flex-1 overflow-hidden rounded-lg bg-white">
-                <div className="h-full overflow-x-auto overflow-y-hidden">
-                  <table className="min-w-full table-fixed border-separate border-spacing-0 whitespace-nowrap text-[16px] font-medium tracking-[-0.04em]">
+                <div className="h-full overflow-hidden">
+                  <table className="w-full table-fixed border-separate border-spacing-0 whitespace-nowrap text-[16px] font-medium tracking-[-0.04em]">
                     <colgroup>
                       <col className="w-[4%]" />
-                      <col className="w-[10%]" />
-                      <col className="w-[12%]" />
-                      <col className="w-[18%]" />
-                      <col className="w-[15%]" />
-                      <col className="w-[10%]" />
+                      <col className="w-[9%]" />
+                      <col className="w-[20%]" />
+                      <col className="w-[14%]" />
+                      <col className="w-[14%]" />
+                      <col className="w-[16%]" />
                       <col className="w-[13%]" />
-                      <col className="w-[10%]" />
-                      <col className="w-[5%]" />
-                      <col className="w-[3%]" />
+                      <col className="w-[12%]" />
+                      <col className="w-[9%]" />
+                      <col className="w-[4%]" />
                     </colgroup>
                     <thead className="bg-[#F3F3F5] text-left text-[16px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
                       <tr>
                         <th className="rounded-l-[5px] px-4 py-2.5 font-medium">
-                          <button type="button" onClick={toggleSelectAllOnPage} className="inline-flex items-center">
+                          <button type="button" onClick={toggleSelectAllOnPage} className="inline-flex cursor-pointer items-center">
                             {checkboxBox(allPageRowsSelected)}
                           </button>
                         </th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">ID<button type="button" onClick={() => toggleSort("id")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Статус<button type="button" onClick={() => toggleSort("status")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Клиент<button type="button" onClick={() => toggleSort("client")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Автомобиль<button type="button" onClick={() => toggleSort("car")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Гос. номер<button type="button" onClick={() => toggleSort("plate")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Мастер<button type="button" onClick={() => toggleSort("master")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Дата приема<button type="button" onClick={() => toggleSort("dueDate")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Сумма<button type="button" onClick={() => toggleSort("amount")}><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">ID<button type="button" onClick={() => toggleSort("id")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Клиент<button type="button" onClick={() => toggleSort("client")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Автомобиль<button type="button" onClick={() => toggleSort("car")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Гос. номер<button type="button" onClick={() => toggleSort("plate")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Статус<button type="button" onClick={() => toggleSort("status")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Мастер<button type="button" onClick={() => toggleSort("master")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Дата приема<button type="button" onClick={() => toggleSort("dueDate")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Сумма<button type="button" onClick={() => toggleSort("amount")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
                         <th className="rounded-r-[5px] px-4 py-2.5 font-medium text-center">⋮</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {pagedRows.map((row, index) => (
+                      {pagedRows.map((row, index) => {
+                        const isSelected = selectedRowIds.has(row.id);
+                        const isHighlighted = highlightWorkOrderId === row.id;
+                        return (
                         <tr
                           key={row.id}
                           ref={(el) => {
                             workOrderRowRefs.current[row.id] = el;
                           }}
-                          className={`border-[5px] border-[#EEEDF0] transition hover:bg-[rgba(224,9,25,0.10)] ${
-                            index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"
-                          } ${highlightWorkOrderId === row.id ? "relative z-[2] shadow-[inset_0_0_0_2px_#EC1C24] ring-2 ring-[#EC1C24]/90" : ""}`}
+                          onClick={() => navigate(`/work-orders/${row.id}`)}
+                          className={`border-[5px] border-[#EEEDF0] transition ${
+                            isSelected
+                              ? "bg-[rgba(224,9,25,0.10)]"
+                              : `${index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"} hover:bg-[rgba(224,9,25,0.10)]`
+                          }`}
+                          style={isHighlighted ? { animation: "workOrderHighlightBorder 4s ease-out" } : undefined}
                         >
                           <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                             <span
@@ -496,7 +873,15 @@ export function WorkOrdersPage() {
                               {checkboxBox(selectedRowIds.has(row.id))}
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-black">{row.id}</td>
+                          <td className="px-4 py-3 text-black">
+                            <span className="inline-flex items-center gap-1.5">
+                              {row.urgent ? <span aria-label="Срочный заказ-наряд">🔥</span> : null}
+                              <span>{row.id}</span>
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-black">{row.client}</td>
+                          <td className="px-4 py-3 text-black">{row.car}</td>
+                          <td className="px-4 py-3 text-black">{row.plate}</td>
                           <td className="px-4 py-3 font-medium">
                             <span className="inline-flex max-w-full items-center gap-2 text-black">
                               <span
@@ -506,9 +891,6 @@ export function WorkOrdersPage() {
                               <span className="min-w-0 truncate text-[16px] font-medium text-black">{row.status}</span>
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-black">{row.client}</td>
-                          <td className="px-4 py-3 text-black">{row.car}</td>
-                          <td className="px-4 py-3 text-black">{row.plate}</td>
                           <td className="px-4 py-3 text-black">
                             <span className="inline-flex max-w-full items-center gap-1.5">
                               <img
@@ -519,11 +901,24 @@ export function WorkOrdersPage() {
                               <span className="min-w-0 truncate">{row.master}</span>
                             </span>
                           </td>
-                          <td className="px-4 py-3 text-black">{shiftRuDate(row.dueDate, -1)}</td>
+                          <td className="px-4 py-3 text-black">{row.dueDate}</td>
                           <td className="px-4 py-3 text-black">{row.amount}</td>
-                          <td className="px-4 py-3 text-center text-[#A0A0A0]">...</td>
+                          <td className="px-4 py-3 text-center text-[#A0A0A0]">
+                            <button
+                              type="button"
+                              className="cursor-pointer text-[#A0A0A0]"
+                              aria-label={`Действия для заказ-наряда ${row.id}`}
+                              aria-expanded={workOrderActionsModal?.id === row.id}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setWorkOrderActionsModal(row);
+                              }}
+                            >
+                              ...
+                            </button>
+                          </td>
                         </tr>
-                      ))}
+                      )})}
                     </tbody>
                   </table>
                 </div>
@@ -547,7 +942,7 @@ export function WorkOrdersPage() {
                       <span className="absolute left-1 top-1 z-0 h-[40px] w-[48px] rounded-full bg-[#EC1C24] shadow-[0_6px_14px_-8px_rgba(236,28,36,0.85)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]" style={{ transform: `translateX(${paginationActiveIndex * 52}px)` }} />
                       {paginationItems.map((item, idx) =>
                         item === "ellipsis" ? (
-                          <button key={`ellipsis-${idx}`} type="button" onClick={() => { if (paginationWindowStart === 1) { setPaginationWindowStart(4); setCurrentPage(4); } }} className="relative z-10 inline-flex h-[40px] w-[48px] items-center justify-center text-[16px] font-bold tracking-[-0.02em] text-white/90 transition-colors hover:text-white">...</button>
+                          <button key={`ellipsis-${idx}`} type="button" className="relative z-10 inline-flex h-[40px] w-[48px] cursor-default items-center justify-center text-[16px] font-bold tracking-[-0.02em] text-white/90">...</button>
                         ) : (
                           <button key={item} type="button" onClick={() => setCurrentPage(item)} className={`relative z-10 inline-flex h-[40px] w-[48px] items-center justify-center rounded-full text-[16px] font-bold tracking-[-0.02em] transition-colors duration-300 ${item === currentPageSafe ? "text-white" : "text-white/80 hover:text-white"}`}>{item}</button>
                         ),
@@ -564,7 +959,7 @@ export function WorkOrdersPage() {
                 </div>
                 <div className="flex items-center gap-2 text-[20px] font-bold tracking-[-0.04em] text-black">
                   <span>
-                    {sortedRows.length === 0 ? `0 из ${TOTAL_WORK_ORDERS_SHOWN}` : `${pageStart + 1} — ${pageEnd} из ${TOTAL_WORK_ORDERS_SHOWN}`}
+                    {sortedRows.length === 0 ? "0 из 0" : `${pageStart + 1} — ${pageEnd} из ${sortedRows.length}`}
                   </span>
                 </div>
               </div>
@@ -572,6 +967,141 @@ export function WorkOrdersPage() {
           </main>
         </div>
       </div>
+      {workOrderActionsModal && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[260] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setWorkOrderActionsModal(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="work-order-actions-title"
+                className="w-full max-w-[360px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="work-order-actions-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Действия с заказ-нарядом
+                  </h2>
+                  <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    № {workOrderActionsModal.id} · {workOrderActionsModal.client}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  {workOrderModalActions.map(({ id, label, danger }) => (
+                    <li key={id}>
+                      <button
+                        type="button"
+                        className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                          danger ? "text-[#EC1C24] hover:bg-[#EC1C24]/10" : "text-[#111826] hover:bg-[#F3F3F5]"
+                        }`}
+                        onClick={() => handleWorkOrderModalAction(id)}
+                      >
+                        {actionIconById(id, danger)}
+                        {label}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {editWorkOrderId && editWorkOrderDraft && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[263] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => {
+                setEditWorkOrderId(null);
+                setEditWorkOrderDraft(null);
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="edit-work-order-title"
+                className="w-full max-w-[560px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="edit-work-order-title" className="text-[20px] font-bold tracking-[-0.04em] text-[#111826]">
+                    Редактировать заказ-наряд
+                  </h2>
+                </div>
+                <div className="flex flex-col gap-3 p-5">
+                  <input
+                    value={editWorkOrderDraft.client}
+                    onChange={(e) =>
+                      setEditWorkOrderDraft((prev) => (prev ? { ...prev, client: e.target.value } : prev))
+                    }
+                    className="h-11 rounded-[10px] border border-[#E4E5E7] bg-white px-3 text-[15px] font-medium text-[#111826] outline-none"
+                    placeholder="ФИО"
+                  />
+                  <input
+                    value={editWorkOrderDraft.car}
+                    onChange={(e) =>
+                      setEditWorkOrderDraft((prev) => (prev ? { ...prev, car: e.target.value } : prev))
+                    }
+                    className="h-11 rounded-[10px] border border-[#E4E5E7] bg-white px-3 text-[15px] font-medium text-[#111826] outline-none"
+                    placeholder="Автомобиль"
+                  />
+                  <input
+                    value={editWorkOrderDraft.plate}
+                    onChange={(e) =>
+                      setEditWorkOrderDraft((prev) => (prev ? { ...prev, plate: e.target.value } : prev))
+                    }
+                    className="h-11 rounded-[10px] border border-[#E4E5E7] bg-white px-3 text-[15px] font-medium text-[#111826] outline-none"
+                    placeholder="Гос. номер"
+                  />
+                </div>
+                <div className="flex gap-2 border-t border-[#EEEDF0] p-5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditWorkOrderId(null);
+                      setEditWorkOrderDraft(null);
+                    }}
+                    className="flex-1 rounded-[10px] bg-[#ECECEF] p-4 text-center text-[16px] font-medium tracking-[-0.04em] text-black"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    onClick={commitWorkOrderEdit}
+                    className="flex-1 rounded-[10px] border-2 border-[#EC1C24] bg-[#EC1C24] p-4 text-center text-[16px] font-medium tracking-[-0.04em] text-white"
+                  >
+                    Сохранить
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      <style>{`
+        @keyframes workOrderHighlightBorder {
+          0% {
+            border-color: #EEEDF0;
+            box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
+          }
+          20% {
+            border-color: #EC1C24;
+            box-shadow: inset 0 0 0 3px #EC1C24;
+          }
+          70% {
+            border-color: #EC1C24;
+            box-shadow: inset 0 0 0 3px #EC1C24;
+          }
+          100% {
+            border-color: #EEEDF0;
+            box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
+          }
+        }
+      `}</style>
     </div>
   );
 }
