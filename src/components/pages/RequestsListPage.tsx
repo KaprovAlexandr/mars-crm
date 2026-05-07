@@ -275,8 +275,7 @@ function exportRequestsToXlsx(requests: RequestTableRow[]) {
   const ws = XLSX.utils.json_to_sheet(data);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Заявки");
-  const stamp = new Date().toISOString().slice(0, 10);
-  XLSX.writeFile(wb, `zayavki_${stamp}.xlsx`);
+  XLSX.writeFile(wb, "заявки.xlsx");
 }
 
 function formatRuDateToday(): string {
