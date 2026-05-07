@@ -1,4 +1,4 @@
-export type ArchiveStyleToastPayload = { line1: string; line2: string };
+export type ArchiveStyleToastPayload = { line1: string; line2: string; navigateTo?: string };
 
 const listeners = new Set<(p: ArchiveStyleToastPayload) => void>();
 

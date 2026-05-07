@@ -1,8 +1,9 @@
 import { subscribeArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 
-type Notice = { line1: string; line2: string };
+type Notice = { line1: string; line2: string; navigateTo?: string };
 
 type StackEntry = Notice & { id: string; leaving: boolean };
 
@@ -19,12 +20,14 @@ function StackToastCard({
   bottomPx,
   leaving,
   zIndex,
+  onGoTo,
 }: {
   line1: string;
   line2: string;
   bottomPx: number;
   leaving: boolean;
   zIndex: number;
+  onGoTo: () => void;
 }) {
   const [enterSettled, setEnterSettled] = useState(false);
 
@@ -36,7 +39,7 @@ function StackToastCard({
   }, []);
 
   const motionBase =
-    "absolute left-0 flex h-[84px] w-full items-center justify-between gap-3 rounded-[12px] bg-white px-4 py-3 text-[16px] font-medium tracking-[-0.04em] text-[#111111] shadow-[0_12px_40px_-12px_rgba(0,0,0,0.38)]";
+    "pointer-events-auto absolute left-0 flex h-[84px] w-full items-center gap-3 rounded-[12px] bg-white px-4 py-3 text-[16px] font-medium tracking-[-0.04em] text-[#111111] shadow-[0_12px_40px_-12px_rgba(0,0,0,0.38)]";
 
   const stateClass = leaving
     ? "pointer-events-none animate-[archiveToastOut_420ms_ease_forwards]"
@@ -55,9 +58,14 @@ function StackToastCard({
           <span className="block truncate">{line2}</span>
         </span>
       </div>
-      <span className="ml-auto inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#EC1C24] text-white">
+      <button
+        type="button"
+        onClick={onGoTo}
+        className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#EC1C24] text-white"
+        aria-label="Перейти"
+      >
         <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
-      </span>
+      </button>
     </div>
   );
 }
@@ -76,6 +84,7 @@ const toastKeyframesCss = `
 `;
 
 export function InAppArchiveToastHost() {
+  const navigate = useNavigate();
   const [stack, setStack] = useState<StackEntry[]>([]);
   const timeoutsRef = useRef<number[]>([]);
 
@@ -93,8 +102,7 @@ export function InAppArchiveToastHost() {
           ? crypto.randomUUID()
           : `toast-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-      setStack((prev) => [...prev, { id, line1: p.line1, line2: p.line2, leaving: false }].slice(-MAX_VISIBLE));
-
+      setStack((prev) => [...prev, { id, line1: p.line1, line2: p.line2, navigateTo: p.navigateTo, leaving: false }].slice(-MAX_VISIBLE));
       const tLeave = window.setTimeout(() => {
         setStack((prev) => prev.map((x) => (x.id === id ? { ...x, leaving: true } : x)));
       }, LEAVE_AT_MS);
@@ -126,6 +134,21 @@ export function InAppArchiveToastHost() {
                       bottomPx={bottomPx}
                       leaving={entry.leaving}
                       zIndex={zIndex}
+                      onGoTo={() => {
+                        if (!entry.navigateTo) return;
+                        try {
+                          const targetUrl = new URL(entry.navigateTo, window.location.origin);
+                          const focusWorkId = targetUrl.searchParams.get("focusWorkId");
+                          if (focusWorkId) {
+                            window.sessionStorage.setItem("workFocusId", focusWorkId);
+                          } else {
+                            window.sessionStorage.removeItem("workFocusId");
+                          }
+                        } catch {
+                          window.sessionStorage.removeItem("workFocusId");
+                        }
+                        navigate(entry.navigateTo);
+                      }}
                     />
                   );
                 })}
