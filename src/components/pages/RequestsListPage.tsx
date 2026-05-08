@@ -5,7 +5,15 @@ import {
 } from "@/lib/notifications/inAppNotificationFeed";
 import { appendUserActionLog } from "@/lib/notifications/actionActivityLog";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
+import { REQUEST_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
 import { CURRENT_USER_DISPLAY_NAME as KAPROV, CURRENT_USER_ROLE } from "@/lib/session/currentUser";
+import {
+  insertRequestStorageRow,
+  isRequestsRemoteEnabled,
+  listRequestsStorageRows,
+  updateRequestsStorageRows,
+  type RequestsStorageRow,
+} from "@/lib/data/requestsDataSource";
 import type { ComponentType } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -43,7 +51,6 @@ type RequestTableRow = {
 };
 
 type RequestSource = RequestTableRow["source"];
-
 const TOTAL_REQUESTS_SHOWN = 127;
 const PAGE_SIZE = 12;
 const PAGINATION_TOTAL_PAGES = 7;
@@ -92,6 +99,59 @@ function parseRuDate(s: string): Date | null {
   const dt = new Date(y, mo, d);
   if (dt.getFullYear() !== y || dt.getMonth() !== mo || dt.getDate() !== d) return null;
   return dt;
+}
+
+function formatIsoToRuDate(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return formatRuDateToday();
+  return formatRuDateFromDate(d);
+}
+
+function formatRuToIsoDate(value: string): string {
+  const d = parseRuDate(value);
+  if (!d) return new Date().toISOString();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0, 0).toISOString();
+}
+
+function mapSupabaseRequestToUi(row: RequestsStorageRow): RequestTableRow {
+  return {
+    id: row.id,
+    status: row.status,
+    client: row.client,
+    phone: row.phone,
+    manager: row.manager,
+    managerPhoto: row.manager_photo,
+    source: row.source,
+    createdAt: formatIsoToRuDate(row.created_at),
+    lastActivityAt: formatIsoToRuDate(row.last_activity_at),
+    archived: row.archived,
+    comment: row.comment,
+  };
+}
+
+function generateNextRequestId(rows: RequestTableRow[]): string {
+  const numericIds = rows
+    .map((row) => Number(row.id))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  const next = (numericIds.length > 0 ? Math.max(...numericIds) : 100000) + 1;
+  return String(next);
+}
+
+async function updateRequestsInSupabase(
+  requestIds: string[],
+  patch: Partial<{
+    status: RequestStatus;
+    client: string;
+    phone: string;
+    manager: string | null;
+    manager_photo: string | null;
+    source: RequestSource;
+    last_activity_at: string;
+    archived: boolean;
+    comment: string;
+  }>,
+) {
+  await updateRequestsStorageRows(requestIds, patch);
 }
 
 function maskRuDateInput(input: string): string {
@@ -241,10 +301,11 @@ type EditRequestDraft = {
 type CreateRequestDraft = {
   client: string;
   phone: string;
+  source: RequestSource | "";
   comment: string;
 };
 
-type SortKey = "client" | "phone" | "status" | "manager" | "comment" | "createdAt";
+type SortKey = "client" | "phone" | "status" | "manager" | "source" | "comment" | "createdAt";
 type SortDir = "asc" | "desc";
 
 const STATUS_SORT_RANK: Record<RequestStatus, number> = {
@@ -286,8 +347,8 @@ export function RequestsListPage() {
   const navigate = useNavigate();
   const isManager = CURRENT_USER_ROLE === "manager";
   const [searchParams, setSearchParams] = useSearchParams();
-  const highlightRequestId = searchParams.get("request");
-  const requestRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
+  const [flashRequestId, setFlashRequestId] = useState<string | null>(null);
+  const [flashRequestPage, setFlashRequestPage] = useState<number | null>(null);
   const focusRequestFiltersResetFor = useRef<string | null>(null);
   const focusRequestScrollKey = useRef<string>("");
   const [isDarkTheme, setIsDarkTheme] = useState(false);
@@ -314,7 +375,9 @@ export function RequestsListPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [paginationWindowStart, setPaginationWindowStart] = useState<1 | 4>(1);
   const [sortState, setSortState] = useState<{ key: SortKey; dir: SortDir } | null>(null);
-  const [rows, setRows] = useState<RequestTableRow[]>(() => initialRequestRows.map((r) => ({ ...r })));
+  const [rows, setRows] = useState<RequestTableRow[]>(() =>
+    isRequestsRemoteEnabled() ? [] : initialRequestRows.map((r) => ({ ...r })),
+  );
   const rowsNotifyPrevRef = useRef(rows);
   const selfTakeWorkRequestIdsRef = useRef(new Set<string>());
   const manuallyCreatedRequestIdsRef = useRef(new Set<string>());
@@ -337,6 +400,28 @@ export function RequestsListPage() {
     [rows],
   );
   const archiveCount = useMemo(() => rows.filter((r) => Boolean(r.archived)).length, [rows]);
+
+  useEffect(() => {
+    if (!isRequestsRemoteEnabled()) return;
+    let cancelled = false;
+    async function loadRequestsFromSupabase() {
+      try {
+        const data = await listRequestsStorageRows();
+        if (!cancelled && Array.isArray(data)) {
+          const hydratedRows = data.map((item) => mapSupabaseRequestToUi(item as RequestsStorageRow));
+          // Prevent "new site request" notifications during initial DB hydration.
+          rowsNotifyPrevRef.current = hydratedRows;
+          setRows(hydratedRows);
+        }
+      } catch (error) {
+        console.warn("Failed to load requests from Supabase, fallback to local rows.", error);
+      }
+    }
+    void loadRequestsFromSupabase();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     function onPointerDown(e: PointerEvent) {
@@ -386,9 +471,13 @@ export function RequestsListPage() {
         if (!prevIds.has(r.id)) {
           if (manuallyCreatedRequestIdsRef.current.has(r.id)) {
             manuallyCreatedRequestIdsRef.current.delete(r.id);
+            if (typeof window !== "undefined") {
+              window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, r.id);
+            }
             emitArchiveStyleToast({
               line1: `Создана заявка № ${r.id}`,
               line2: `${r.client} · ${r.phone}`,
+              navigateTo: `/?request=${encodeURIComponent(r.id)}`,
             });
             appendUserActionLog({
               title: "Создать заявку",
@@ -398,9 +487,13 @@ export function RequestsListPage() {
           }
           if (r.source === "Сайт") {
             appendNewRequestFromSiteToFeed({ requestId: r.id, client: r.client, phone: r.phone });
+            if (typeof window !== "undefined") {
+              window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, r.id);
+            }
             emitArchiveStyleToast({
               line1: `Новая заявка с сайта № ${r.id} (${r.client})`,
               line2: `${r.phone} · поступила с сайта`,
+              navigateTo: `/?request=${encodeURIComponent(r.id)}`,
             });
           }
           continue;
@@ -474,6 +567,7 @@ export function RequestsListPage() {
       else if (sortState.key === "phone") cmp = a.phone.replace(/\D/g, "").localeCompare(b.phone.replace(/\D/g, ""));
       else if (sortState.key === "status") cmp = STATUS_SORT_RANK[a.status] - STATUS_SORT_RANK[b.status];
       else if (sortState.key === "manager") cmp = (a.manager ?? "").localeCompare(b.manager ?? "", "ru");
+      else if (sortState.key === "source") cmp = a.source.localeCompare(b.source, "ru");
       else if (sortState.key === "comment") cmp = a.comment.localeCompare(b.comment, "ru");
       else if (sortState.key === "createdAt") {
         const ad = parseRuDate(a.createdAt)?.getTime() ?? 0;
@@ -492,11 +586,13 @@ export function RequestsListPage() {
       focusRequestFiltersResetFor.current = null;
       return;
     }
+    const targetArchiveMode = searchParams.get("archive") === "1";
     if (!rows.some((r) => r.id === rid)) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
           next.delete("request");
+          next.delete("archive");
           return next;
         },
         { replace: true },
@@ -510,7 +606,7 @@ export function RequestsListPage() {
     setUnassignedOnly(false);
     setMineOnly(false);
     setOverdueOnly(false);
-    setArchiveOnly(false);
+    setArchiveOnly(targetArchiveMode);
     setOpenFilter(null);
     setSelectedRowIds(new Set());
     setStatusFilter(new Set(REQUEST_STATUS_FILTERS));
@@ -526,34 +622,53 @@ export function RequestsListPage() {
       focusRequestScrollKey.current = "";
       return;
     }
+    if (typeof window !== "undefined") {
+      window.sessionStorage.removeItem(REQUEST_LIST_FLASH_ARMED_KEY);
+    }
     const idx = sortedRows.findIndex((r) => r.id === rid);
     if (idx === -1) return;
     const scrollKey = `${rid}@${idx}`;
     if (focusRequestScrollKey.current === scrollKey) return;
     focusRequestScrollKey.current = scrollKey;
-    setCurrentPage(Math.floor(idx / PAGE_SIZE) + 1);
-    const raf = window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        requestRowRefs.current[rid]?.scrollIntoView({ behavior: "smooth", block: "center" });
-      });
-    });
-    const tid = window.setTimeout(() => {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete("request");
-          return next;
-        },
-        { replace: true },
-      );
+    const targetPage = Math.floor(idx / PAGE_SIZE) + 1;
+    setFlashRequestId(rid);
+    setFlashRequestPage(targetPage);
+    setCurrentPage(targetPage);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("request");
+        next.delete("archive");
+        return next;
+      },
+      { replace: true },
+    );
+    const clearFlashTid = window.setTimeout(() => {
+      setFlashRequestId((prev) => (prev === rid ? null : prev));
+      setFlashRequestPage((prev) => (prev === targetPage ? null : prev));
+    }, 4200);
+    const clearRefsTid = window.setTimeout(() => {
       focusRequestScrollKey.current = "";
       focusRequestFiltersResetFor.current = null;
-    }, 9000);
+    }, 1200);
     return () => {
-      window.cancelAnimationFrame(raf);
-      window.clearTimeout(tid);
+      window.clearTimeout(clearFlashTid);
+      window.clearTimeout(clearRefsTid);
     };
   }, [searchParams, sortedRows, setSearchParams]);
+
+  function onRequestFlashAnimationEnd(e: AnimationEvent, rowId: string) {
+    if (e.animationName !== "requestRowHighlightBorder") return;
+    setFlashRequestId((cur) => (cur === rowId ? null : cur));
+  }
+
+  useEffect(() => {
+    if (!flashRequestId || flashRequestPage === null) return;
+    if (currentPage !== flashRequestPage) {
+      setFlashRequestId(null);
+      setFlashRequestPage(null);
+    }
+  }, [currentPage, flashRequestId, flashRequestPage]);
 
   const totalPages = PAGINATION_TOTAL_PAGES;
   const currentPageSafe = Math.min(currentPage, totalPages);
@@ -584,14 +699,18 @@ export function RequestsListPage() {
 
   const requestModalActions = useMemo((): RequestActionEntry[] => {
     if (!requestActionsModal) return [];
+    const current = rows.find((r) => r.id === requestActionsModal.id) ?? requestActionsModal;
+    const isArchivedContext = Boolean(current.archived) || archiveOnly;
     if (selectedRowIds.size > 1) {
       return [
         { id: "takeWork", label: "Взять в работу", Icon: RequestActionIconGetJob },
         { id: "status", label: "Изменить статус", Icon: RequestActionIconStatus },
-        { id: "delete", label: "Переместить в архив", Icon: RequestActionIconTrash, danger: true },
+        isArchivedContext
+          ? { id: "delete", label: "Вернуть в таблицу", Icon: RequestActionIconTrash }
+          : { id: "delete", label: "Переместить в архив", Icon: RequestActionIconTrash, danger: true },
       ];
     }
-    const row = rows.find((r) => r.id === requestActionsModal.id) ?? requestActionsModal;
+    const row = current;
     const list: RequestActionEntry[] = [
       { id: "call", label: "Позвонить", Icon: RequestActionIconPhone },
       { id: "booking", label: "Перенести в запись", Icon: RequestActionIconZapis },
@@ -609,12 +728,14 @@ export function RequestsListPage() {
     list.push(
       { id: "status", label: "Изменить статус", Icon: RequestActionIconStatus },
       { id: "edit", label: "Редактировать заявку", Icon: RequestActionIconEdit },
-      { id: "delete", label: "Переместить в архив", Icon: RequestActionIconTrash, danger: true },
+      isArchivedContext
+        ? { id: "delete", label: "Вернуть в таблицу", Icon: RequestActionIconTrash }
+        : { id: "delete", label: "Переместить в архив", Icon: RequestActionIconTrash, danger: true },
     );
     return list;
-  }, [requestActionsModal, rows, isManager, selectedRowIds]);
+  }, [requestActionsModal, rows, isManager, selectedRowIds, archiveOnly]);
 
-  function handleRequestModalAction(actionId: RequestActionId) {
+  async function handleRequestModalAction(actionId: RequestActionId) {
     if (!requestActionsModal) return;
     const id = requestActionsModal.id;
     const isBulkAction = selectedRowIds.size > 1;
@@ -626,38 +747,128 @@ export function RequestsListPage() {
       return;
     }
 
-    if (actionId === "delete") {
-      const firstArchived = rows.find((r) => r.id === targetIds[0]) ?? requestActionsModal;
+    if (actionId === "booking") {
+      const row = rows.find((r) => r.id === id) ?? requestActionsModal;
       setRequestActionsModal(null);
-      if (!isBulkAction) setArchivingRowId(id);
-      window.setTimeout(
-        () => {
-          setRows((prev) => prev.map((r) => (targetIds.includes(r.id) ? { ...r, archived: true } : r)));
-          setSelectedRowIds((prev) => {
-            const next = new Set(prev);
-            targetIds.forEach((tid) => next.delete(tid));
-            return next;
-          });
-          setStatusPickerForId((openId) => (openId && targetIds.includes(openId) ? null : openId));
-          setBulkStatusPickerIds(null);
-          setArchivingRowId((current) => (current && targetIds.includes(current) ? null : current));
-          emitArchiveStyleToast({
-            line1: isBulkAction ? `${targetIds.length} заявок перемещены в архив` : `Заявка № ${firstArchived.id} (${firstArchived.client})`,
-            line2: isBulkAction ? "без изменения статуса" : "перемещена в архив",
-          });
-          appendUserActionLog({
-            title: "Переместить в архив",
-            description: isBulkAction
-              ? `Групповое действие · ${targetIds.length} заявок`
-              : `Заявка № ${firstArchived.id} · ${firstArchived.client}`,
-          });
-        },
-        isBulkAction ? 0 : 260,
+      navigate(
+        `/journal?newBookingFromRequest=1&client=${encodeURIComponent(row.client)}&phone=${encodeURIComponent(row.phone)}&comment=${encodeURIComponent(row.comment)}`,
       );
       return;
     }
 
+    if (actionId === "delete") {
+      const firstArchived = rows.find((r) => r.id === targetIds[0]) ?? requestActionsModal;
+      const isRestoreAction = archiveOnly || targetIds.every((tid) => Boolean((rows.find((r) => r.id === tid) ?? requestActionsModal)?.archived));
+      setRequestActionsModal(null);
+      if (isRequestsRemoteEnabled()) {
+        try {
+          await updateRequestsInSupabase(targetIds, { archived: isRestoreAction ? false : true });
+        } catch (error) {
+          console.warn("Failed to update requests archive flag in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: "Ошибка синхронизации",
+            line2: isRestoreAction ? "Не удалось вернуть заявку в таблицу" : "Не удалось переместить заявку в архив",
+          });
+          return;
+        }
+      }
+      if (isRestoreAction) {
+        if (isBulkAction) {
+          setRows((prev) => prev.map((r) => (targetIds.includes(r.id) ? { ...r, archived: false } : r)));
+          setSelectedRowIds(new Set());
+          setStatusPickerForId((openId) => (openId && targetIds.includes(openId) ? null : openId));
+          setBulkStatusPickerIds(null);
+          emitArchiveStyleToast({
+            line1: `${targetIds.length} заявок`,
+            line2: "возвращены в таблицу",
+          });
+        } else {
+          const restoredRowId = firstArchived.id;
+          const restoredClient = firstArchived.client;
+          setArchivingRowId(restoredRowId);
+          window.setTimeout(() => {
+            setRows((prev) =>
+              prev.map((r) =>
+                r.id === restoredRowId ? { ...r, archived: false } : r,
+              ),
+            );
+            setSelectedRowIds((prev) => {
+              const next = new Set(prev);
+              next.delete(restoredRowId);
+              return next;
+            });
+            setStatusPickerForId((openId) => (openId === restoredRowId ? null : openId));
+            setBulkStatusPickerIds(null);
+            setArchivingRowId((current) => (current === restoredRowId ? null : current));
+            if (typeof window !== "undefined") {
+              window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, restoredRowId);
+            }
+            emitArchiveStyleToast({
+              line1: `Заявка № ${restoredRowId} (${restoredClient})`,
+              line2: "возвращена в таблицу",
+              navigateTo: `/?request=${encodeURIComponent(restoredRowId)}`,
+            });
+          }, 260);
+        }
+      } else if (isBulkAction) {
+        setRows((prev) => prev.map((r) => (targetIds.includes(r.id) ? { ...r, archived: true } : r)));
+        setSelectedRowIds(new Set());
+        setStatusPickerForId((openId) => (openId && targetIds.includes(openId) ? null : openId));
+        setBulkStatusPickerIds(null);
+        emitArchiveStyleToast({
+          line1: `${targetIds.length} заявок`,
+          line2: "перемещены в архив",
+        });
+      } else {
+        const archivedRowId = firstArchived.id;
+        const archivedClient = firstArchived.client;
+        setArchivingRowId(archivedRowId);
+        window.setTimeout(() => {
+          setRows((prev) =>
+            prev.map((r) =>
+              r.id === archivedRowId ? { ...r, archived: true } : r,
+            ),
+          );
+          setSelectedRowIds((prev) => {
+            const next = new Set(prev);
+            next.delete(archivedRowId);
+            return next;
+          });
+          setStatusPickerForId((openId) => (openId === archivedRowId ? null : openId));
+          setBulkStatusPickerIds(null);
+          setArchivingRowId((current) => (current === archivedRowId ? null : current));
+          if (typeof window !== "undefined") {
+            window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, archivedRowId);
+          }
+          emitArchiveStyleToast({
+            line1: `Заявка № ${archivedRowId} (${archivedClient})`,
+            line2: "перемещена в архив",
+            navigateTo: `/?request=${encodeURIComponent(archivedRowId)}&archive=1`,
+          });
+        }, 260);
+      }
+      appendUserActionLog({
+        title: isRestoreAction ? "Вернуть в таблицу" : "Переместить в архив",
+        description: isBulkAction
+          ? `Групповое действие · ${targetIds.length} заявок`
+          : `Заявка № ${firstArchived.id} · ${firstArchived.client}`,
+      });
+      return;
+    }
+
     if (actionId === "takeWork") {
+      if (isRequestsRemoteEnabled()) {
+        try {
+          await updateRequestsInSupabase(targetIds, { manager: KAPROV, manager_photo: KAPROV_PHOTO });
+        } catch (error) {
+          console.warn("Failed to assign manager in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: "Ошибка синхронизации",
+            line2: "Не удалось взять заявку в работу",
+          });
+          return;
+        }
+      }
       targetIds.forEach((tid) => selfTakeWorkRequestIdsRef.current.add(tid));
       setRows((prev) =>
         prev.map((r) => (targetIds.includes(r.id) ? { ...r, manager: KAPROV, managerPhoto: KAPROV_PHOTO } : r)),
@@ -668,6 +879,18 @@ export function RequestsListPage() {
     }
 
     if (actionId === "assignByLead") {
+      if (isRequestsRemoteEnabled()) {
+        try {
+          await updateRequestsInSupabase([id], { manager: KAPROV, manager_photo: KAPROV_PHOTO });
+        } catch (error) {
+          console.warn("Failed to assign manager by lead in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: "Ошибка синхронизации",
+            line2: "Не удалось назначить ответственного",
+          });
+          return;
+        }
+      }
       setRows((prev) =>
         prev.map((r) => (r.id === id ? { ...r, manager: KAPROV, managerPhoto: KAPROV_PHOTO } : r)),
       );
@@ -701,9 +924,25 @@ export function RequestsListPage() {
     setRequestActionsModal(null);
   }
 
-  function commitRequestStatus(status: RequestStatus, requestIds?: string[]) {
+  async function commitRequestStatus(status: RequestStatus, requestIds?: string[]) {
     const ids = requestIds ?? (statusPickerForId ? [statusPickerForId] : []);
     if (ids.length === 0) return;
+    const nextLastActivityAtIso = formatRuToIsoDate(formatRuDateToday());
+    if (isRequestsRemoteEnabled()) {
+      try {
+        await updateRequestsInSupabase(ids, {
+          status,
+          last_activity_at: nextLastActivityAtIso,
+        });
+      } catch (error) {
+        console.warn("Failed to update request status in Supabase.", error);
+        emitArchiveStyleToast({
+          line1: "Ошибка синхронизации",
+          line2: "Не удалось обновить статус заявки",
+        });
+        return;
+      }
+    }
     setRows((prev) =>
       prev.map((r) =>
         ids.includes(r.id)
@@ -727,12 +966,30 @@ export function RequestsListPage() {
     });
   }
 
-  function commitRequestEdit() {
+  async function commitRequestEdit() {
     if (!editRequestId || !editRequestDraft) return;
     const normalizedClient = editRequestDraft.client.trim();
     const normalizedPhone = editRequestDraft.phone.trim();
     const normalizedComment = editRequestDraft.comment.trim();
     if (!normalizedClient || !normalizedPhone || !normalizedComment) return;
+
+    if (isRequestsRemoteEnabled()) {
+      try {
+        await updateRequestsInSupabase([editRequestId], {
+          client: normalizedClient,
+          phone: normalizedPhone,
+          source: editRequestDraft.source,
+          comment: normalizedComment,
+        });
+      } catch (error) {
+        console.warn("Failed to edit request in Supabase.", error);
+        emitArchiveStyleToast({
+          line1: "Ошибка синхронизации",
+          line2: "Не удалось сохранить изменения заявки",
+        });
+        return;
+      }
+    }
 
     setRows((prev) =>
       prev.map((r) =>
@@ -800,7 +1057,13 @@ export function RequestsListPage() {
   const filterToggleTitleClass = isDarkTheme ? "text-[#F4F7FF]" : "text-black";
   const filterToggleCountClass = isDarkTheme ? "text-[#9AA4BC]" : "text-[#7D7D7D]";
 
+  function clearRequestFlashState() {
+    setFlashRequestId(null);
+    setFlashRequestPage(null);
+  }
+
   function resetFilters() {
+    clearRequestFlashState();
     setSearchQuery("");
     setUnassignedOnly(false);
     setMineOnly(false);
@@ -815,6 +1078,7 @@ export function RequestsListPage() {
   }
 
   function toggleQuickFilter(filter: "overdue" | "unassigned" | "mine" | "archive") {
+    clearRequestFlashState();
     if (filter === "overdue") {
       const next = !overdueOnly;
       setOverdueOnly(next);
@@ -884,14 +1148,15 @@ export function RequestsListPage() {
   const isBulkStatusPicker = Boolean(bulkStatusPickerIds && bulkStatusPickerIds.length > 0);
   const editRequestRow = editRequestId ? rows.find((r) => r.id === editRequestId) ?? null : null;
 
-  function commitCreateRequest() {
+  async function commitCreateRequest() {
     if (!createRequestDraft) return;
     const normalizedClient = createRequestDraft.client.trim();
     const normalizedPhone = createRequestDraft.phone.trim();
     const normalizedComment = createRequestDraft.comment.trim();
-    if (!normalizedClient || !normalizedPhone || !normalizedComment) return;
-    const id = String(Math.floor(100000 + Math.random() * 900000));
+    if (!normalizedClient || !normalizedPhone || !normalizedComment || !createRequestDraft.source) return;
+    const id = generateNextRequestId(rows);
     const createdAt = formatRuDateToday();
+    const createdAtIso = new Date().toISOString();
     const newRow: RequestTableRow = {
       id,
       status: "Новая",
@@ -899,11 +1164,39 @@ export function RequestsListPage() {
       phone: normalizedPhone,
       manager: KAPROV,
       managerPhoto: KAPROV_PHOTO,
-      source: "Сайт",
+      source: createRequestDraft.source,
       createdAt,
       lastActivityAt: createdAt,
       comment: normalizedComment,
     };
+
+    if (isRequestsRemoteEnabled()) {
+      try {
+        const payload: RequestsStorageRow = {
+          id: newRow.id,
+          status: newRow.status,
+          client: newRow.client,
+          phone: newRow.phone,
+          manager: newRow.manager,
+          manager_photo: newRow.managerPhoto,
+          source: newRow.source,
+          created_at: createdAtIso,
+          last_activity_at: createdAtIso,
+          archived: Boolean(newRow.archived),
+          comment: newRow.comment,
+        };
+        const data = await insertRequestStorageRow(payload);
+        if (data) {
+          manuallyCreatedRequestIdsRef.current.add(data.id);
+          setRows((prev) => [mapSupabaseRequestToUi(data as RequestsStorageRow), ...prev]);
+          setCreateRequestDraft(null);
+          return;
+        }
+      } catch (error) {
+        console.warn("Failed to create request in Supabase, fallback to local state.", error);
+      }
+    }
+
     manuallyCreatedRequestIdsRef.current.add(id);
     setRows((prev) => [newRow, ...prev]);
     setCreateRequestDraft(null);
@@ -915,30 +1208,11 @@ export function RequestsListPage() {
         <div className={`flex h-full w-full rounded-[16px] p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
           <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
             <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/dashboard")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="home" /></button>
             <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="cube" /></button>
             <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
             <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
             <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
             <div className="mt-auto space-y-2">
-              <button
-                onClick={() => setIsDarkTheme((prev) => !prev)}
-                className={`grid h-12 w-12 place-items-center rounded-[10px] transition ${
-                  isDarkTheme ? "bg-white text-[#11131D]" : "text-[#8C93A5] hover:bg-white/10"
-                }`}
-                title="Переключить тему"
-              >
-                <svg viewBox="0 0 24 24" fill="none" className="h-[24px] w-[24px]">
-                  {isDarkTheme ? (
-                    <>
-                      <circle cx="12" cy="12" r="4.2" stroke="currentColor" strokeWidth="1.8" />
-                      <path d="M12 2.8V5.1M12 18.9V21.2M2.8 12H5.1M18.9 12H21.2M5.2 5.2L6.9 6.9M17.1 17.1L18.8 18.8M18.8 5.2L17.1 6.9M6.9 17.1L5.2 18.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                    </>
-                  ) : (
-                    <path d="M15.8 3.6C13.8 3.9 11.9 5 10.8 6.7C9.7 8.4 9.5 10.6 10.2 12.5C10.9 14.4 12.3 15.9 14.2 16.7C16.2 17.5 18.4 17.4 20.2 16.4C19.4 18 18.1 19.4 16.5 20.3C14.8 21.2 12.9 21.5 11 21.1C9 20.7 7.2 19.6 5.9 18C4.6 16.4 3.9 14.4 4 12.3C4.1 10.3 4.9 8.3 6.3 6.9C7.7 5.4 9.6 4.5 11.6 4.2C13 3.9 14.4 3.8 15.8 3.6Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                  )}
-                </svg>
-              </button>
               {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
               {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
               <NavRailNotifications />
@@ -961,27 +1235,37 @@ export function RequestsListPage() {
               <div className="flex items-center gap-3">
                 <div className="flex items-baseline gap-2">
                   <h1 className={`text-[36px] font-bold leading-[100%] tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>Заявки</h1>
-                  <span className="text-[16px] font-medium tracking-[-0.04em] text-[#B4B4B6]">
-                    {noActiveFilters ? `${TOTAL_REQUESTS_SHOWN} заявок` : `${displayRows.length} из ${TOTAL_REQUESTS_SHOWN}`}
-                  </span>
+                  <span className={`text-[16px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#888888]"}`}>({TOTAL_REQUESTS_SHOWN})</span>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className={`h-12 w-[320px] rounded-[10px] border-[3px] px-3 text-[18px] font-medium tracking-[-0.04em] outline-none ${
-                      isDarkTheme
-                        ? "border-[#2B3345] bg-[#0E1420] text-[#C9D2E8] placeholder:text-[#7C879F]"
-                        : "border-[#E4E5E7] bg-white text-[#8A8A8A] placeholder:text-[#B5B5B5]"
-                    }`}
-                    placeholder="Поиск по телефону или ФИО..."
-                  />
+                  <div className="relative">
+                    <input
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      placeholder="Поиск по телефону или ФИО..."
+                      aria-label="Поиск по телефону или ФИО..."
+                    />
+                    {searchQuery.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        aria-label="Очистить поиск"
+                        className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-[8px] text-black"
+                      >
+                        <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
+                          <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
                     onClick={() =>
                       setCreateRequestDraft({
                         client: "",
                         phone: "",
+                        source: "",
                         comment: "",
                       })
                     }
@@ -1176,15 +1460,16 @@ export function RequestsListPage() {
                   <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
                     <colgroup>
                       <col className="w-[5%]" />
-                      <col className="w-[17%]" />
-                      <col className="w-[12%]" />
-                      <col className="w-[11%]" />
+                      <col className="w-[20%]" />
+                      <col className="w-[16%]" />
                       <col className="w-[13%]" />
-                      <col className="w-[22%]" />
+                      <col className="w-[16%]" />
                       <col className="w-[10%]" />
+                      <col className="w-[17%]" />
                       <col className="w-[10%]" />
+                      <col className="w-[5%]" />
                     </colgroup>
-                    <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
+                    <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] whitespace-nowrap ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
                       <tr>
                         <th className="rounded-l-[5px] px-4 py-2.5 align-middle font-medium">
                           <span
@@ -1204,6 +1489,7 @@ export function RequestsListPage() {
                         <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Телефон<button type="button" onClick={() => toggleSort("phone")} className="cursor-pointer"><SortIcon /></button></span></th>
                         <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Статус<button type="button" onClick={() => toggleSort("status")} className="cursor-pointer"><SortIcon /></button></span></th>
                         <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Менеджер<button type="button" onClick={() => toggleSort("manager")} className="cursor-pointer"><SortIcon /></button></span></th>
+                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Источник<button type="button" onClick={() => toggleSort("source")} className="cursor-pointer"><SortIcon /></button></span></th>
                         <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Комментарий<button type="button" onClick={() => toggleSort("comment")} className="cursor-pointer"><SortIcon /></button></span></th>
                         <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Дата создания<button type="button" onClick={() => toggleSort("createdAt")} className="cursor-pointer"><SortIcon /></button></span></th>
                         <th className="rounded-r-[5px] px-4 py-2.5 align-middle font-medium text-center">⋮</th>
@@ -1223,15 +1509,16 @@ export function RequestsListPage() {
                           bgCls = index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white";
                         }
                         const hoverCls = isSelected ? "" : "hover:bg-[rgba(224,9,25,0.10)]";
+                        const isFlashTarget = flashRequestId === row.id;
+                        const flashStyle = isFlashTarget ? ({ animation: "requestRowHighlightBorder 4s ease-out" } as const) : undefined;
                         return (
                         <tr
-                          key={`${row.id}-${row.client}-${row.createdAt}`}
-                          ref={(el) => {
-                            requestRowRefs.current[row.id] = el;
-                          }}
+                          key={row.id}
                           className={`border-[5px] transition ${borderCls} ${bgCls} ${hoverCls} ${
                             isArchiving ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]" : ""
-                          } ${highlightRequestId === row.id ? "relative z-[2] shadow-[inset_0_0_0_2px_#EC1C24] ring-2 ring-[#EC1C24]/90" : ""}`}
+                          } ${isFlashTarget ? "relative z-[2]" : ""}`}
+                          style={flashStyle}
+                          onAnimationEnd={(e) => onRequestFlashAnimationEnd(e, row.id)}
                         >
                           <td className="px-4 py-3 align-middle" onClick={(e) => e.stopPropagation()}>
                             <span
@@ -1281,6 +1568,7 @@ export function RequestsListPage() {
                               <span className={isDarkTheme ? "text-[#7C879F]" : "text-[#A0A0A0]"}>—</span>
                             )}
                           </td>
+                          <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.source}</td>
                           <td className={`max-w-0 min-w-0 px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>
                             <span
                               className="inline-block max-w-full cursor-default overflow-hidden text-ellipsis whitespace-nowrap align-top"
@@ -1474,6 +1762,24 @@ export function RequestsListPage() {
               opacity: 0;
             }
           }
+          @keyframes requestRowHighlightBorder {
+            0% {
+              border-color: #EEEDF0;
+              box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
+            }
+            20% {
+              border-color: #EC1C24;
+              box-shadow: inset 0 0 0 3px #EC1C24;
+            }
+            70% {
+              border-color: #EC1C24;
+              box-shadow: inset 0 0 0 3px #EC1C24;
+            }
+            100% {
+              border-color: #EEEDF0;
+              box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
+            }
+          }
         `}
       </style>
       {createRequestDraft && typeof document !== "undefined"
@@ -1527,6 +1833,35 @@ export function RequestsListPage() {
                     }`}
                     placeholder="Телефон"
                   />
+                  <div className="relative">
+                    <select
+                      value={createRequestDraft.source}
+                      onChange={(e) => setCreateRequestDraft((prev) => (prev ? { ...prev, source: e.target.value as RequestSource } : prev))}
+                      className={`h-12 w-full appearance-none rounded-[10px] border-[3px] px-3 pr-12 text-[18px] font-medium tracking-[-0.04em] outline-none ${
+                        isDarkTheme
+                          ? `border-[#2B3345] bg-[#0E1420] ${createRequestDraft.source ? "text-black" : "text-[#B5B5B5]"}`
+                          : `border-[#E4E5E7] bg-white ${createRequestDraft.source ? "text-black" : "text-[#B5B5B5]"}`
+                      }`}
+                    >
+                      <option value="" disabled>
+                        Выберите источник
+                      </option>
+                      {ALL_SOURCES.map((source) => (
+                        <option key={source} value={source} className="text-black">
+                          {source}
+                        </option>
+                      ))}
+                    </select>
+                    <span
+                      className={`pointer-events-none absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] ${
+                        isDarkTheme ? "text-[#8FA0BE]" : "text-[#111111]"
+                      }`}
+                    >
+                      <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]">
+                        <path d="M3 6L8 11L13 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </span>
+                  </div>
                   <textarea
                     value={createRequestDraft.comment}
                     onChange={(e) => setCreateRequestDraft((prev) => (prev ? { ...prev, comment: e.target.value } : prev))}
@@ -1614,7 +1949,7 @@ export function RequestsListPage() {
                       }`}
                     >
                       {ALL_SOURCES.map((source) => (
-                        <option key={source} value={source}>
+                        <option key={source} value={source} className="text-black">
                           {source}
                         </option>
                       ))}

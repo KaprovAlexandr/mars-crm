@@ -21,6 +21,7 @@ function StackToastCard({
   leaving,
   zIndex,
   onGoTo,
+  showGoTo,
 }: {
   line1: string;
   line2: string;
@@ -28,6 +29,7 @@ function StackToastCard({
   leaving: boolean;
   zIndex: number;
   onGoTo: () => void;
+  showGoTo: boolean;
 }) {
   const [enterSettled, setEnterSettled] = useState(false);
 
@@ -58,14 +60,16 @@ function StackToastCard({
           <span className="block truncate">{line2}</span>
         </span>
       </div>
-      <button
-        type="button"
-        onClick={onGoTo}
-        className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#EC1C24] text-white"
-        aria-label="Перейти"
-      >
-        <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
-      </button>
+      {showGoTo ? (
+        <button
+          type="button"
+          onClick={onGoTo}
+          className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#EC1C24] text-white"
+          aria-label="Перейти"
+        >
+          <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -134,6 +138,7 @@ export function InAppArchiveToastHost() {
                       bottomPx={bottomPx}
                       leaving={entry.leaving}
                       zIndex={zIndex}
+                      showGoTo={Boolean(entry.navigateTo)}
                       onGoTo={() => {
                         if (!entry.navigateTo) return;
                         try {
