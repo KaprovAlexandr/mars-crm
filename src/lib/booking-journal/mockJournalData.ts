@@ -212,10 +212,70 @@ export const MOCK_JOURNAL_CLIENTS: Client[] = [
   {
     id: "jc3",
     name: "Петров Сергей Иванович",
-    phone: "+79991234567",
+    phone: "+7 (999) 123-45-67",
     cars: [
       { id: "jc3c1", model: "BMW X5", plate: "P111MP178" },
       { id: "jc3c2", model: "Skoda Octavia", plate: "X333OP777" },
     ],
+  },
+  {
+    id: "jc4",
+    name: "Смирнов Дмитрий Олегович",
+    phone: "+7 (999) 333-44-55",
+    cars: [{ id: "jc4c1", model: "LADA Vesta", plate: "T320PT197" }],
+  },
+  {
+    id: "jc5",
+    name: "Фролов Алексей Андреевич",
+    phone: "+7 (999) 444-55-66",
+    cars: [{ id: "jc5c1", model: "Kia Rio", plate: "Y654CK777" }],
+  },
+  {
+    id: "jc6",
+    name: "Кузнецов Евгений Павлович",
+    phone: "+7 (999) 555-66-77",
+    cars: [{ id: "jc6c1", model: "Hyundai Solaris", plate: "M456KX199" }],
+  },
+  {
+    id: "jc7",
+    name: "Морозов Егор Викторович",
+    phone: "+7 (999) 666-77-88",
+    cars: [{ id: "jc7c1", model: "Hyundai Tucson", plate: "P445TT799" }],
+  },
+  {
+    id: "jc8",
+    name: "Новикова Марина Игоревна",
+    phone: "+7 (999) 777-88-99",
+    cars: [{ id: "jc8c1", model: "Nissan Qashqai", plate: "E222CC750" }],
+  },
+  {
+    id: "jc9",
+    name: "Сидоров Кирилл Андреевич",
+    phone: "+7 (999) 101-22-33",
+    cars: [{ id: "jc9c1", model: "Kia Rio", plate: "E789EH750" }],
+  },
+  {
+    id: "jc10",
+    name: "Алексеева Мария Сергеевна",
+    phone: "+7 (999) 202-33-44",
+    cars: [{ id: "jc10c1", model: "Skoda Octavia", plate: "X333OP777" }],
+  },
+  {
+    id: "jc11",
+    name: "Воробьева Марина Викторовна",
+    phone: "+7 (999) 303-44-55",
+    cars: [{ id: "jc11c1", model: "Nissan Qashqai", plate: "E222CC750" }],
+  },
+  {
+    id: "jc12",
+    name: "Соколов Павел Николаевич",
+    phone: "+7 (999) 404-55-66",
+    cars: [{ id: "jc12c1", model: "Hyundai Solaris", plate: "M456KX199" }],
+  },
+  {
+    id: "jc13",
+    name: "Орлова Анна Вячеславовна",
+    phone: "+7 (999) 505-66-77",
+    cars: [{ id: "jc13c1", model: "Volkswagen Polo", plate: "A517BC197" }],
   },
 ];

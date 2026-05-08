@@ -11,7 +11,12 @@ import {
   removeInAppNotificationById,
   subscribeInAppNotifications,
 } from "@/lib/notifications/inAppNotificationFeed";
-import { buildNotificationNavigatePath, inferNotificationDeepLink } from "@/lib/notifications/inferNotificationDeepLink";
+import {
+  buildNotificationNavigatePath,
+  inferNotificationDeepLink,
+  REQUEST_LIST_FLASH_ARMED_KEY,
+  WORK_ORDER_LIST_FLASH_ARMED_KEY,
+} from "@/lib/notifications/inferNotificationDeepLink";
 import {
   applyPersistedReadToNotifications,
   persistNotificationMarkedRead,
@@ -35,7 +40,7 @@ const MOCK_NOTIFICATIONS: NotificationItem[] = [
   {
     id: "1",
     section: "today",
-    title: "Скоро запись № b1",
+    title: "Скоро запись",
     description: "за 30 мин до 09:00 · Иванов А.С. · Диагностика · BMW M5",
     time: "06 сентября, 08:30",
     unread: true,
@@ -297,6 +302,11 @@ export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }
   function handleOpenNotification(n: NotificationItem) {
     const link = inferNotificationDeepLink(n);
     if (!link) return;
+    if (link.kind === "workOrder") {
+      window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, link.workOrderId);
+    } else if (link.kind === "request") {
+      window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, link.requestId);
+    }
     navigate(buildNotificationNavigatePath(link));
     onClose();
   }

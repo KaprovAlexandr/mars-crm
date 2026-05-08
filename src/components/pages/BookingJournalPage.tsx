@@ -4,7 +4,22 @@ import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
 import { appendJournalBookingSoonToFeed } from "@/lib/notifications/inAppNotificationFeed";
 import { appendUserActionLog } from "@/lib/notifications/actionActivityLog";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
-import type { CSSProperties, KeyboardEvent, MouseEvent } from "react";
+import { WORK_ORDER_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
+import {
+  deleteJournalStorageRow,
+  insertJournalStorageRow,
+  isJournalRemoteEnabled,
+  listJournalStorageRows,
+  updateJournalStorageRows,
+  type JournalStorageRow,
+} from "@/lib/data/journalDataSource";
+import {
+  RequestActionIconEdit,
+  RequestActionIconGetJob,
+  RequestActionIconStatus,
+  RequestActionIconTrash,
+} from "../icons/RequestRowModalIcons";
+import type { CSSProperties, KeyboardEvent, MouseEvent, TransitionEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -25,6 +40,7 @@ import {
   type JournalBookingStatus,
   type JournalStatusActor,
 } from "../../lib/booking-journal/mockJournalData";
+import { workOrderRows } from "@/components/pages/WorkOrdersPage";
 import {
   findNearestSlotByTime,
   getFreeIntervalsForBoxDay,
@@ -41,6 +57,7 @@ type BookingStatus = JournalBookingStatus;
 type BookingCard = {
   id: string;
   title: string;
+  phone?: string;
   service: string;
   car: string;
   masterShortName: string;
@@ -50,6 +67,14 @@ type BookingCard = {
   status?: BookingStatus;
   statusActor?: JournalStatusActor;
 };
+
+type BookingCardActionId = "moveToWorkOrder" | "status" | "edit" | "delete";
+type BoxHeaderActionId = "callMaster" | "openProfile" | "changeMaster" | "removeMaster";
+type EditBookingDraft = {
+  clientTitle: string;
+  car: string;
+};
+const TRANSFER_TO_WORK_ORDER_DRAFT_KEY = "transferToWorkOrderDraft";
 
 function bookingCardMatchesSearch(card: BookingCard, qNorm: string): boolean {
   if (!qNorm) return true;
@@ -63,8 +88,8 @@ const JOURNAL_STATUS_SLOT: Record<BookingStatus, string> = {
   "Ожидает клиента": "bg-[#FFFCF0]",
   "В работе": "bg-[#ECF4FF]",
   Завершена: "bg-[#F3F4F6]",
-  "Клиент не приехал": "bg-[#FFF0F3]",
-  Отменена: "bg-white",
+  "Клиент не приехал": "bg-[#FCE6E8]",
+  Отменена: "bg-[#ECECEF]",
 };
 
 /** Бейдж статуса (согласован с фоном слота). */
@@ -73,8 +98,8 @@ const JOURNAL_STATUS_CHIP: Record<BookingStatus, string> = {
   "Ожидает клиента": "bg-[#FEF3C7] text-[#854D0E]",
   "В работе": "bg-[#BFDBFE] text-[#1D4ED8]",
   Завершена: "bg-[#E5E7EB] text-[#374151]",
-  "Клиент не приехал": "bg-[#FECACA] text-[#991B1B]",
-  Отменена: "border border-[#991B1B] bg-white text-[#991B1B]",
+  "Клиент не приехал": "bg-[#EC1C24] text-white",
+  Отменена: "bg-[#222222] text-white",
 };
 
 /** Цвет плашки времени внутри карточки по статусу слота. */
@@ -83,8 +108,17 @@ const JOURNAL_STATUS_TIME_BADGE: Record<BookingStatus, string> = {
   "Ожидает клиента": "bg-[#D5A321] text-white",
   "В работе": "bg-[#2F7FEA] text-white",
   Завершена: "bg-[#7B8494] text-white",
-  "Клиент не приехал": "bg-[#D95368] text-white",
-  Отменена: "bg-[#991B1B] text-white",
+  "Клиент не приехал": "bg-[#EC1C24] text-white",
+  Отменена: "bg-[#222222] text-white",
+};
+
+const JOURNAL_STATUS_DOT_COLOR: Record<BookingStatus, string> = {
+  Подтверждена: "#26B36A",
+  "Ожидает клиента": "#D5A321",
+  "В работе": "#2F7FEA",
+  Завершена: "#7B8494",
+  "Клиент не приехал": "#EC1C24",
+  Отменена: "#222222",
 };
 
 type BoxColumn = {
@@ -224,11 +258,38 @@ function getJournalFreeGapsForBoxDay(
 
 type JournalRow = Booking & {
   clientTitle: string;
+  clientPhone?: string;
   service: string;
   car: string;
   status?: BookingStatus;
   statusActor?: JournalStatusActor;
 };
+function mapStorageJournalRowToUi(row: JournalStorageRow): JournalRow {
+  const normalizeDateTime = (value: string): string => {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    const yyyy = parsed.getFullYear();
+    const mm = String(parsed.getMonth() + 1).padStart(2, "0");
+    const dd = String(parsed.getDate()).padStart(2, "0");
+    const hh = String(parsed.getHours()).padStart(2, "0");
+    const mi = String(parsed.getMinutes()).padStart(2, "0");
+    const ss = String(parsed.getSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
+  };
+  return {
+    id: row.id,
+    boxId: row.box_id,
+    masterId: row.master_id,
+    startTime: normalizeDateTime(row.start_time),
+    endTime: normalizeDateTime(row.end_time),
+    clientTitle: row.client_title,
+    clientPhone: row.client_phone ?? "",
+    service: row.service,
+    car: row.car,
+    status: row.status ?? "Подтверждена",
+    statusActor: row.status_actor ?? "manager",
+  };
+}
 
 const BOX_COLUMN_LAYOUT = [
   { boxId: "1", title: "Бокс №1", worker: "Журавлев М." },
@@ -278,7 +339,7 @@ function toBookings(rows: JournalRow[]): Booking[] {
   return rows.map(({ id, boxId, masterId, startTime, endTime }) => ({ id, boxId, masterId, startTime, endTime }));
 }
 
-function rowsToBoxColumns(rows: JournalRow[], day: string): BoxColumn[] {
+function rowsToBoxColumns(rows: JournalRow[], day: string, clients: Client[]): BoxColumn[] {
   const dayRows = rows.filter((r) => r.startTime.slice(0, 10) === day);
   return BOX_COLUMN_LAYOUT.map((col) => ({
     title: col.title,
@@ -286,18 +347,26 @@ function rowsToBoxColumns(rows: JournalRow[], day: string): BoxColumn[] {
     cards: dayRows
       .filter((r) => r.boxId === col.boxId)
       .sort((a, b) => a.startTime.localeCompare(b.startTime))
-      .map((r) => ({
-        id: r.id,
-        title: toClientShortName(r.clientTitle),
-        service: r.service,
-        car: r.car,
-        masterShortName: JOURNAL_MASTERS.find((m) => m.id === r.masterId)?.name ?? r.masterId,
-        masterPhoto: JOURNAL_MASTERS.find((m) => m.id === defaultMasterIdForBox(r.boxId))?.photoUrl,
-        start: r.startTime.slice(11, 16),
-        end: r.endTime.slice(11, 16),
-        status: r.status,
-        statusActor: r.statusActor,
-      })),
+      .map((r) => {
+        const baseCar = carTitleOnly(r.car);
+        const matchedClient = findClientByJournalTitle(clients, r.clientTitle);
+        const resolvedTitle = matchedClient?.name ?? r.clientTitle;
+        const resolvedPhone = matchedClient?.phone ?? r.clientPhone ?? "";
+        const resolvedCarModel = matchedClient?.cars?.[0]?.model?.trim() || baseCar;
+        return {
+          id: r.id,
+          title: resolvedTitle,
+          phone: resolvedPhone,
+          service: r.service,
+          car: resolvedCarModel,
+          masterShortName: JOURNAL_MASTERS.find((m) => m.id === r.masterId)?.name ?? r.masterId,
+          masterPhoto: JOURNAL_MASTERS.find((m) => m.id === defaultMasterIdForBox(r.boxId))?.photoUrl,
+          start: r.startTime.slice(11, 16),
+          end: r.endTime.slice(11, 16),
+          status: r.status,
+          statusActor: r.statusActor,
+        };
+      }),
   }));
 }
 
@@ -316,12 +385,122 @@ function toClientShortName(fullName: string): string {
   return firstInitial ? `${surname} ${firstInitial}.` : surname;
 }
 
+function findClientByJournalTitle(clients: Client[], title: string): Client | null {
+  const normalizedTitle = title.trim().toLowerCase();
+  if (!normalizedTitle) return null;
+  return (
+    clients.find((c) => c.name.trim().toLowerCase() === normalizedTitle) ??
+    clients.find((c) => toClientShortName(c.name).trim().toLowerCase() === normalizedTitle) ??
+    null
+  );
+}
+
+function clampClientPhoneTooltipPos(
+  clientX: number,
+  clientY: number,
+  fullText: string,
+): { x: number; y: number; maxWidth: number } {
+  if (typeof window === "undefined") return { x: clientX + 14, y: clientY + 14, maxWidth: 360 };
+  const gap = 14;
+  const preferredMaxW = 360;
+  const tooltipMaxH = Math.min(280, window.innerHeight - 24);
+  const charsPerLine = 40;
+  const lineH = 22;
+  const verticalPad = 22;
+  const lines = Math.max(1, Math.ceil(fullText.length / charsPerLine));
+  const estH = Math.min(tooltipMaxH, lines * lineH + verticalPad);
+
+  const x = Math.max(8, clientX + gap);
+  const maxWidth = Math.min(preferredMaxW, Math.max(80, window.innerWidth - x - 8));
+
+  let y = clientY + gap;
+  if (y + estH > window.innerHeight - 8) {
+    y = clientY - estH - gap;
+  }
+  y = Math.max(8, Math.min(y, window.innerHeight - estH - 8));
+  return { x, y, maxWidth };
+}
+
+function formatPhoneForCardTooltip(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  const national10 = digits.startsWith("7") && digits.length >= 11 ? digits.slice(1, 11) : digits.slice(0, 10);
+  if (national10.length !== 10) return phone;
+  return `+7 (${national10.slice(0, 3)}) ${national10.slice(3, 6)}-${national10.slice(6, 8)}-${national10.slice(8, 10)}`;
+}
+
 /** Как в карточках макета: «Toyota Camry  123ВС777». */
 function formatCarLine(carModel: string, plateOrVin: string): string {
   const m = carModel.trim();
   const p = plateOrVin.trim();
   if (m && p) return `${m}  ${p}`;
   return m || p || "—";
+}
+
+function extractWorkOrderIdFromCardText(text: string): string | null {
+  const m = text.match(/Заказ-наряд\s*№\s*(\d+)/i);
+  return m?.[1] ?? null;
+}
+
+function parseRuDate(s: string): Date | null {
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(s.trim());
+  if (!m) return null;
+  const d = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const y = Number(m[3]);
+  const dt = new Date(y, mo, d);
+  if (dt.getFullYear() !== y || dt.getMonth() !== mo || dt.getDate() !== d) return null;
+  return dt;
+}
+
+function normalizeRuNameForCompare(s: string): string {
+  return s.trim().toLowerCase().replaceAll("ё", "е");
+}
+
+function toTelHref(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return "tel:+7";
+  if (digits.startsWith("8") && digits.length >= 11) return `tel:+7${digits.slice(1)}`;
+  if (digits.startsWith("7") && digits.length >= 11) return `tel:+${digits}`;
+  return `tel:+7${digits}`;
+}
+
+function BoxHeaderActionIcon({ type, className }: { type: "call" | "profile" | "switch" | "remove"; className?: string }) {
+  if (type === "call") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+        <path
+          d="M7.2 5.5C7.5 5 8 4.8 8.6 4.9L10.9 5.3C11.5 5.4 11.9 5.8 12 6.4L12.4 8.5C12.5 9 12.3 9.5 11.9 9.9L10.8 11C11.5 12.3 12.6 13.4 13.9 14.2L15 13.1C15.4 12.7 15.9 12.5 16.4 12.6L18.5 13C19.1 13.1 19.5 13.5 19.6 14.1L20 16.4C20.1 17 19.9 17.5 19.4 17.8L17.8 18.9C17.2 19.3 16.5 19.4 15.8 19.2C13.4 18.5 11.2 17.2 9.4 15.4C7.6 13.6 6.3 11.4 5.6 9C5.4 8.3 5.5 7.6 5.9 7L7.2 5.5Z"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+  if (type === "profile") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+        <circle cx="12" cy="8" r="3.25" stroke="currentColor" strokeWidth="1.9" />
+        <path d="M5 19.2C5.9 15.9 8.4 14.5 12 14.5C15.6 14.5 18.1 15.9 19 19.2" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (type === "switch") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+        <path d="M7 7H18M18 7L15.2 4.2M18 7L15.2 9.8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M17 17H6M6 17L8.8 14.2M6 17L8.8 19.8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden>
+      <path d="M6 7H18M9 7V5.8C9 4.8 9.8 4 10.8 4H13.2C14.2 4 15 4.8 15 5.8V7" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M8 9L8.7 18.1C8.8 19.1 9.6 19.9 10.6 19.9H13.4C14.4 19.9 15.2 19.1 15.3 18.1L16 9" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+      <path d="M10.5 11.2V16.2M13.5 11.2V16.2" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 function carTitleOnly(carLine: string): string {
@@ -344,11 +523,29 @@ const JOURNAL_WORK_END_MIN = 20 * 60;
 const JOURNAL_MIN_SERVICE_DURATION_MIN = 30;
 const TIRE_BOX_ID = "4";
 const TIRE_SERVICE_IDS = new Set(["tire1", "tire2", "tire3", "tire4", "tire5"]);
+const TIRE_ONLY_SERVICE_NAMES = new Set([
+  "Замена 2-х колес",
+  "Сезонная смена шин",
+  "Балансировка колес",
+  "Ремонт / подкачка колес",
+  "Проверка сход-развала",
+]);
 const GENERAL_SERVICE_IDS = new Set([
   "exp1", "exp2", "exp3", "exp4",
   "std2", "std3", "std4",
   "cmp1", "cmp2", "cmp3", "cmp4",
 ]);
+const JOURNAL_SOON_REMINDER_DEDUPE_STORAGE_KEY = "journalSoonReminderDedupeKeys";
+export const JOURNAL_ROWS_ACTIVITY_STORAGE_KEY = "journalRowsActivitySnapshot";
+const JOURNAL_ROWS_PERSIST_KEY = "journalRowsPersistedV1";
+const JOURNAL_CLIENTS_PERSIST_KEY = "journalClientsPersistedV1";
+const JOURNAL_ASSIGNED_PERSIST_KEY = "journalAssignedMastersPersistedV1";
+const INITIAL_ASSIGNED_MASTERS_BY_DATE_BOX: Record<string, string> = {
+  "2026-05-08|1": "m1",
+  "2026-05-08|2": "m2",
+  "2026-05-08|3": "m3",
+  "2026-05-08|4": "m4",
+};
 
 /** Хвост дня в данных — до 20:00; в подписи показываем «до 19:40», как на сетке. */
 function formatFreeGapEndLabelForUi(endMin: number): string {
@@ -509,6 +706,8 @@ export function BookingJournalPage() {
   const isManager = CURRENT_USER_ROLE === "manager";
   const [searchParams, setSearchParams] = useSearchParams();
   const bookingHighlightId = searchParams.get("booking");
+  const [flashBookingId, setFlashBookingId] = useState<string | null>(null);
+  const [flashBookingDay, setFlashBookingDay] = useState<string | null>(null);
   const bookingArticleRefs = useRef<Record<string, HTMLElement | null>>({});
   const bookingFocusResetFor = useRef<string | null>(null);
   const bookingScrollKey = useRef<string>("");
@@ -516,20 +715,114 @@ export function BookingJournalPage() {
   const [headerClock, setHeaderClock] = useState(formatHeaderClockNow);
   const [hoverLineY, setHoverLineY] = useState<number | null>(null);
   const [journalSearchQuery, setJournalSearchQuery] = useState("");
-  const [journalRows, setJournalRows] = useState<JournalRow[]>(buildInitialRows);
+  const [journalRows, setJournalRows] = useState<JournalRow[]>(() => {
+    if (typeof window === "undefined") return buildInitialRows();
+    if (isJournalRemoteEnabled()) return [];
+    try {
+      const raw = window.sessionStorage.getItem(JOURNAL_ROWS_PERSIST_KEY);
+      if (!raw) return buildInitialRows();
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as JournalRow[]) : buildInitialRows();
+    } catch {
+      return buildInitialRows();
+    }
+  });
   const [journalViewDate, setJournalViewDate] = useState<string>(() => journalTodayYmd());
   const [sidebarCalendarMonth, setSidebarCalendarMonth] = useState<{ year: number; month: number }>(() => {
     const { y, m } = parseYmdLocal(journalTodayYmd());
     return { year: y, month: m };
   });
-  const [clients, setClients] = useState<Client[]>(MOCK_JOURNAL_CLIENTS);
+  const [clients, setClients] = useState<Client[]>(() => {
+    if (typeof window === "undefined") return MOCK_JOURNAL_CLIENTS;
+    try {
+      const raw = window.sessionStorage.getItem(JOURNAL_CLIENTS_PERSIST_KEY);
+      if (!raw) return MOCK_JOURNAL_CLIENTS;
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? (parsed as Client[]) : MOCK_JOURNAL_CLIENTS;
+    } catch {
+      return MOCK_JOURNAL_CLIENTS;
+    }
+  });
+
+  useEffect(() => {
+    if (!isJournalRemoteEnabled()) return;
+    let cancelled = false;
+    async function loadJournalRowsFromSupabase() {
+      try {
+        const data = await listJournalStorageRows();
+        if (!cancelled && Array.isArray(data)) {
+          const hydratedRows = data.map((item) => mapStorageJournalRowToUi(item as JournalStorageRow));
+          setJournalRows(hydratedRows);
+        }
+      } catch (error) {
+        console.warn("Failed to load journal bookings from Supabase, fallback to session rows.", error);
+      }
+    }
+    void loadJournalRowsFromSupabase();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const snapshot = journalRows.map((row) => ({
+      id: row.id,
+      clientTitle: row.clientTitle,
+      startTime: row.startTime,
+      car: row.car,
+    }));
+    window.sessionStorage.setItem(JOURNAL_ROWS_ACTIVITY_STORAGE_KEY, JSON.stringify(snapshot));
+    try {
+      window.sessionStorage.setItem(JOURNAL_ROWS_PERSIST_KEY, JSON.stringify(journalRows));
+    } catch {
+      // ignore storage errors
+    }
+  }, [journalRows]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.sessionStorage.setItem(JOURNAL_CLIENTS_PERSIST_KEY, JSON.stringify(clients));
+    } catch {
+      // ignore storage errors
+    }
+  }, [clients]);
   const [isNewBookingModalOpen, setIsNewBookingModalOpen] = useState(false);
   const [modalPrefill, setModalPrefill] = useState<ModalPrefill | null>(null);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
   const [isServiceMenuOpen, setIsServiceMenuOpen] = useState(false);
-  const [assignedMastersByDateBox, setAssignedMastersByDateBox] = useState<Record<string, string>>({});
+  const [assignedMastersByDateBox, setAssignedMastersByDateBox] = useState<Record<string, string>>(() => {
+    if (typeof window === "undefined") return INITIAL_ASSIGNED_MASTERS_BY_DATE_BOX;
+    try {
+      const raw = window.sessionStorage.getItem(JOURNAL_ASSIGNED_PERSIST_KEY);
+      if (!raw) return INITIAL_ASSIGNED_MASTERS_BY_DATE_BOX;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return INITIAL_ASSIGNED_MASTERS_BY_DATE_BOX;
+      return parsed as Record<string, string>;
+    } catch {
+      return INITIAL_ASSIGNED_MASTERS_BY_DATE_BOX;
+    }
+  });
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.sessionStorage.setItem(JOURNAL_ASSIGNED_PERSIST_KEY, JSON.stringify(assignedMastersByDateBox));
+    } catch {
+      // ignore storage errors
+    }
+  }, [assignedMastersByDateBox]);
   const [assignModalBoxId, setAssignModalBoxId] = useState<string | null>(null);
   const [assignModalSelectedMasterId, setAssignModalSelectedMasterId] = useState<string | null>(null);
+  const [boxHeaderActionsModal, setBoxHeaderActionsModal] = useState<{ boxId: string; boxTitle: string; masterName: string; masterId: string } | null>(null);
+  const [employeeProfileModal, setEmployeeProfileModal] = useState<{ masterId: string } | null>(null);
+  const [employeeProfileSnapshot, setEmployeeProfileSnapshot] = useState<{ masterId: string } | null>(null);
+  const [employeeProfileMounted, setEmployeeProfileMounted] = useState(false);
+  const [employeeProfileActive, setEmployeeProfileActive] = useState(false);
+  const [employeeProfileTab, setEmployeeProfileTab] = useState<"main" | "kpi" | "orders">("main");
+  const [employeeOrdersSection, setEmployeeOrdersSection] = useState<"active" | "recentlyDone">("active");
+  const profileExitFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const profileExitingRef = useRef(false);
+  const openProfileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [selectedDate, setSelectedDate] = useState<string>(() => journalTodayYmd());
   const [availableSlots, setAvailableSlots] = useState<Slot[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
@@ -552,13 +845,22 @@ export function BookingJournalPage() {
   const [newClientName, setNewClientName] = useState("");
   const [newClientPhoneDigits, setNewClientPhoneDigits] = useState("");
   const [newClientCar, setNewClientCar] = useState("");
+  const [isRequestBookingFlow, setIsRequestBookingFlow] = useState(false);
+  const [requestBookingComment, setRequestBookingComment] = useState("");
+  const requestBookingLaunchKeyRef = useRef<string>("");
+  const [bookingCardActionsModal, setBookingCardActionsModal] = useState<BookingCard | null>(null);
+  const [bookingStatusPickerForId, setBookingStatusPickerForId] = useState<string | null>(null);
+  const [editBookingId, setEditBookingId] = useState<string | null>(null);
+  const [editBookingDraft, setEditBookingDraft] = useState<EditBookingDraft | null>(null);
+  const [clientPhoneTooltip, setClientPhoneTooltip] = useState<{ text: string; x: number; y: number; maxWidth: number } | null>(null);
+  const [missingMasterPrompt, setMissingMasterPrompt] = useState<{ boxId: string; boxTitle: string } | null>(null);
 
   const callPhoneInputRef = useRef<HTMLInputElement>(null);
   const newClientPhoneInputRef = useRef<HTMLInputElement>(null);
 
   const displayColumns = useMemo(
-    () => rowsToBoxColumns(journalRows, journalViewDate),
-    [journalRows, journalViewDate],
+    () => rowsToBoxColumns(journalRows, journalViewDate, clients),
+    [journalRows, journalViewDate, clients],
   );
   const dayBookingsCount = useMemo(
     () => journalRows.filter((r) => r.startTime.slice(0, 10) === journalViewDate).length,
@@ -584,6 +886,66 @@ export function BookingJournalPage() {
   const assignModalBoxTitle = assignModalBoxId
     ? (BOX_COLUMN_LAYOUT.find((b) => b.boxId === assignModalBoxId)?.title ?? `Бокс №${assignModalBoxId}`)
     : "";
+  const profileMaster = employeeProfileSnapshot
+    ? JOURNAL_MASTERS.find((m) => m.id === employeeProfileSnapshot.masterId) ?? null
+    : null;
+  const profileMasterShortName = profileMaster?.name ?? "";
+  const masterActiveOrderItems = useMemo(() => {
+    if (!profileMasterShortName) return [];
+    const masterNorm = normalizeRuNameForCompare(profileMasterShortName);
+    return workOrderRows
+      .filter((row) => {
+        if (normalizeRuNameForCompare(row.master) !== masterNorm) return false;
+        return row.status === "Новый" || row.status === "В работе" || row.status === "Ожидание запчастей";
+      })
+      .map((row) => ({
+        text: `Заказ-наряд №${row.id} · ${row.car}`,
+        icon: "/group87.svg",
+      }));
+  }, [profileMasterShortName]);
+  const masterCompletedOrderItems = useMemo(() => {
+    if (!profileMasterShortName) return [];
+    const now = new Date();
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const masterNorm = normalizeRuNameForCompare(profileMasterShortName);
+    return workOrderRows
+      .filter((row) => {
+        if (normalizeRuNameForCompare(row.master) !== masterNorm) return false;
+        if (row.status !== "Готово" && row.status !== "Закрыт") return false;
+        const acceptedAt = parseRuDate(row.dueDate);
+        if (!acceptedAt) return false;
+        const diffMs = now.getTime() - acceptedAt.getTime();
+        return diffMs >= 0 && diffMs <= sevenDaysMs;
+      })
+      .map((row) => ({
+        text: `Заказ-наряд №${row.id} · ${row.car}`,
+        icon: "/group87.svg",
+      }));
+  }, [profileMasterShortName]);
+  const profileMasterFullName = profileMaster?.fullName ?? profileMaster?.name ?? "Мастер";
+  const profileMasterPhoto = profileMaster?.photoUrl ?? "https://i.pravatar.cc/80?img=12";
+  const profileMasterPhotoLarge = profileMasterPhoto.replace("/80?", "/160?");
+  const profileMasterNameParts = profileMasterFullName.split(" ");
+  const profileMasterFirstLine = profileMasterNameParts.slice(0, 2).join(" ");
+  const profileMasterSecondLine = profileMasterNameParts.slice(2).join(" ");
+  const profileMasterMeta = {
+    birthDate: "24.02.1992",
+    gender: "Мужской",
+    citizenship: "Российская Федерация",
+    phone: "+7 (911) 123-45-67",
+    email: "zhuravlev.m@mars-auto.ru",
+    role: "Мастер",
+    schedule: "5/2, 8:00 - 20:00",
+    status: "В отпуске",
+  };
+  const employeeKpiCards = [
+    { title: "Выручка сотрудника", value: "4 196₽ за месяц", note: "↑ 1f(7%) за неделю" },
+    { title: "Выработка (нормо-часы)", value: "76 ч / 160 ч", note: "↑ 6ч за неделю" },
+    { title: "Загрузка (%)", value: "48%", note: "↑ +3% за неделю" },
+    { title: "Кол-во заказов", value: "16 заказов", note: "↑ 13а неделю" },
+    { title: "Средний чек", value: "2 623 ₽", note: "↑ 300 ₽ за неделю" },
+    { title: "Зарплата (расчёт)", value: "113 784 ₽", note: "включая доп. продажи 62 966 ₽" },
+  ];
   const dayFreeWindowsCount = useMemo(() => {
     const bookings = toBookings(journalRows);
     return BOX_COLUMN_LAYOUT.reduce(
@@ -637,6 +999,16 @@ export function BookingJournalPage() {
     const sk = `${bid}@${day}`;
     if (bookingScrollKey.current === sk) return;
     bookingScrollKey.current = sk;
+    setFlashBookingId(bid);
+    setFlashBookingDay(day);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("booking");
+        return next;
+      },
+      { replace: true },
+    );
     const raf = window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         bookingArticleRefs.current[bid]?.scrollIntoView({
@@ -647,22 +1019,27 @@ export function BookingJournalPage() {
       });
     });
     const tid = window.setTimeout(() => {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete("booking");
-          return next;
-        },
-        { replace: true },
-      );
       bookingScrollKey.current = "";
       bookingFocusResetFor.current = null;
-    }, 9000);
+    }, 1200);
+    const clearFlashTid = window.setTimeout(() => {
+      setFlashBookingId((prev) => (prev === bid ? null : prev));
+      setFlashBookingDay((prev) => (prev === day ? null : prev));
+    }, 4200);
     return () => {
       window.cancelAnimationFrame(raf);
       window.clearTimeout(tid);
+      window.clearTimeout(clearFlashTid);
     };
   }, [searchParams, journalRows, journalViewDate, setSearchParams]);
+
+  useEffect(() => {
+    if (!flashBookingId || !flashBookingDay) return;
+    if (journalViewDate !== flashBookingDay) {
+      setFlashBookingId(null);
+      setFlashBookingDay(null);
+    }
+  }, [journalViewDate, flashBookingId, flashBookingDay]);
 
   const sidebarCalendarCells = useMemo(
     () => buildSidebarCalendarCells(sidebarCalendarMonth.year, sidebarCalendarMonth.month),
@@ -719,6 +1096,58 @@ export function BookingJournalPage() {
   }, []);
 
   useEffect(() => {
+    if (employeeProfileModal) setEmployeeProfileSnapshot(employeeProfileModal);
+  }, [employeeProfileModal]);
+
+  useEffect(() => {
+    if (employeeProfileModal) {
+      profileExitingRef.current = false;
+      if (profileExitFallbackRef.current) {
+        clearTimeout(profileExitFallbackRef.current);
+        profileExitFallbackRef.current = null;
+      }
+      setEmployeeProfileActive(false);
+      setEmployeeProfileMounted(true);
+      const id = requestAnimationFrame(() => {
+        requestAnimationFrame(() => setEmployeeProfileActive(true));
+      });
+      return () => cancelAnimationFrame(id);
+    }
+    profileExitingRef.current = true;
+    setEmployeeProfileActive(false);
+  }, [employeeProfileModal]);
+
+  function finishProfileExit() {
+    setEmployeeProfileMounted(false);
+    setEmployeeProfileSnapshot(null);
+    if (profileExitFallbackRef.current) {
+      clearTimeout(profileExitFallbackRef.current);
+      profileExitFallbackRef.current = null;
+    }
+  }
+
+  function handleProfileDrawerTransitionEnd(e: TransitionEvent<HTMLDivElement>) {
+    if (e.propertyName !== "transform") return;
+    if (e.target !== e.currentTarget) return;
+    if (profileExitingRef.current) {
+      profileExitingRef.current = false;
+      finishProfileExit();
+    }
+  }
+
+  useEffect(() => {
+    if (!employeeProfileModal && employeeProfileMounted) {
+      profileExitFallbackRef.current = setTimeout(finishProfileExit, 700);
+      return () => {
+        if (profileExitFallbackRef.current) {
+          clearTimeout(profileExitFallbackRef.current);
+          profileExitFallbackRef.current = null;
+        }
+      };
+    }
+  }, [employeeProfileModal, employeeProfileMounted]);
+
+  useEffect(() => {
     if (!bookingSoonNotice) return;
     setBookingSoonPhase("enter");
     const leaveTimer = window.setTimeout(() => setBookingSoonPhase("leave"), 1900);
@@ -728,6 +1157,19 @@ export function BookingJournalPage() {
       window.clearTimeout(clearTimer);
     };
   }, [bookingSoonNotice]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const raw = window.sessionStorage.getItem(JOURNAL_SOON_REMINDER_DEDUPE_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as string[];
+      if (!Array.isArray(parsed)) return;
+      firedJournalSoonReminders.current = new Set(parsed.filter((v): v is string => typeof v === "string"));
+    } catch {
+      firedJournalSoonReminders.current = new Set();
+    }
+  }, []);
 
   useEffect(() => {
     const REMINDER_LEAD_MS = 30 * 60 * 1000;
@@ -745,8 +1187,14 @@ export function BookingJournalPage() {
         const dedupeKey = `soon:${r.id}:${r.startTime}`;
         if (firedJournalSoonReminders.current.has(dedupeKey)) continue;
         firedJournalSoonReminders.current.add(dedupeKey);
+        if (typeof window !== "undefined") {
+          window.sessionStorage.setItem(
+            JOURNAL_SOON_REMINDER_DEDUPE_STORAGE_KEY,
+            JSON.stringify(Array.from(firedJournalSoonReminders.current)),
+          );
+        }
         const hhmm = r.startTime.slice(11, 16);
-        const line1 = `Скоро запись № ${r.id}`;
+        const line1 = "Скоро запись";
         const line2 = `за 30 мин до ${hhmm} · ${r.clientTitle} · ${r.service} · ${r.car}`;
         setBookingSoonNotice({ line1, line2 });
         appendJournalBookingSoonToFeed({
@@ -844,6 +1292,10 @@ export function BookingJournalPage() {
     const slotsInsideVisibleWindows = all
       .filter((slot) => slotFitsVisibleFreeWindow(selectedDate, slot, bookingsSlice))
       .filter((slot) => {
+        if (!modalPrefill) {
+          if (TIRE_ONLY_SERVICE_NAMES.has(selectedService.name)) return slot.boxId === TIRE_BOX_ID;
+          return slot.boxId !== TIRE_BOX_ID;
+        }
         if (TIRE_SERVICE_IDS.has(selectedService.id)) return slot.boxId === TIRE_BOX_ID;
         if (GENERAL_SERVICE_IDS.has(selectedService.id)) return slot.boxId !== TIRE_BOX_ID;
         return true;
@@ -910,8 +1362,24 @@ export function BookingJournalPage() {
     setIsNewBookingModalOpen(true);
   }
 
+  function tryOpenNewBookingModal(prefill: HoverFreeHint | ModalPrefill | null = null): boolean {
+    const boxId = prefill?.boxId ?? null;
+    if (boxId) {
+      const assignedKey = assignmentKey(journalViewDate, boxId);
+      if (!assignedMastersByDateBox[assignedKey]) {
+        const boxTitle = BOX_COLUMN_LAYOUT.find((b) => b.boxId === boxId)?.title ?? `Бокс №${boxId}`;
+        setMissingMasterPrompt({ boxId, boxTitle });
+        return false;
+      }
+    }
+    openNewBookingModal(prefill);
+    return true;
+  }
+
   function closeNewBookingModal() {
     setIsNewBookingModalOpen(false);
+    setIsRequestBookingFlow(false);
+    setRequestBookingComment("");
     setCurrentStep(1);
     setSkippedSlotStep(false);
     setModalPrefill(null);
@@ -953,9 +1421,48 @@ export function BookingJournalPage() {
       return;
     }
     if (currentStep === 2) {
+      if (isRequestBookingFlow) {
+        closeNewBookingModal();
+        return;
+      }
       setCurrentStep(1);
     }
   }
+
+  useEffect(() => {
+    if (searchParams.get("newBookingFromRequest") !== "1") {
+      requestBookingLaunchKeyRef.current = "";
+      return;
+    }
+    const client = (searchParams.get("client") ?? "").trim();
+    const phone = searchParams.get("phone") ?? "";
+    const comment = (searchParams.get("comment") ?? "").trim();
+    const launchKey = `${client}|${phone}`;
+    if (!client || requestBookingLaunchKeyRef.current === launchKey) return;
+    requestBookingLaunchKeyRef.current = launchKey;
+
+    openNewBookingModal(null);
+    setIsRequestBookingFlow(true);
+    setStep1ClientMode("new_form");
+    setNewClientName(client);
+    setNewClientPhoneDigits(national10FromPhoneInput(phone));
+    setRequestBookingComment(comment);
+    setSelectedClient(null);
+    setSelectedCar(null);
+    setCurrentStep(2);
+
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("newBookingFromRequest");
+        next.delete("client");
+        next.delete("phone");
+        next.delete("comment");
+        return next;
+      },
+      { replace: true },
+    );
+  }, [searchParams, setSearchParams]);
 
   function clickTimelineEmpty(e: MouseEvent, boxId: string, cards: BookingCard[]) {
     const t = e.target as HTMLElement;
@@ -964,6 +1471,12 @@ export function BookingJournalPage() {
     const rect = el.getBoundingClientRect();
     const localY = e.clientY - rect.top;
     if (isLocalYInsideAnyCard(localY, cards)) return;
+    const assignedKey = assignmentKey(journalViewDate, boxId);
+    if (!assignedMastersByDateBox[assignedKey]) {
+      const boxTitle = BOX_COLUMN_LAYOUT.find((b) => b.boxId === boxId)?.title ?? `Бокс №${boxId}`;
+      setMissingMasterPrompt({ boxId, boxTitle });
+      return;
+    }
     const row = timelineLocalYToRowIndex(localY, 40, timeSlots.length - 1);
     const startHHmm = timeSlots[row];
     if (!startHHmm) return;
@@ -974,23 +1487,29 @@ export function BookingJournalPage() {
     if (gapEnd <= startMin) return;
     if (gapEnd - startMin < JOURNAL_MIN_SERVICE_DURATION_MIN) return;
     const startLabel = toTimeLabel(startMin);
-    openNewBookingModal({ boxId, startIso: `${journalViewDate}T${startLabel}:00`, gapEndMinute: gapEnd });
+    tryOpenNewBookingModal({ boxId, startIso: `${journalViewDate}T${startLabel}:00`, gapEndMinute: gapEnd });
   }
 
-  function confirmNewBooking() {
+  async function confirmNewBooking() {
     if (currentStep !== 4 || !selectedService || !selectedSlot) return;
 
     let clientTitle = "";
+    let clientPhone = "";
     let carLine = "";
 
     if (selectedClient && selectedCar) {
       clientTitle = selectedClient.name;
+      clientPhone = selectedClient.phone;
       carLine = formatCarLine(selectedCar.model, selectedCar.plate);
-    } else if (newClientName.trim() && newClientPhoneDigits.length === 10 && newClientCar.trim()) {
+    } else if (
+      newClientName.trim() &&
+      newClientPhoneDigits.length === 10 &&
+      (newClientCar.trim() || isRequestBookingFlow)
+    ) {
       const n = newClientName.trim();
       const ph = displayRuPhoneComplete(newClientPhoneDigits);
-      const cm = newClientCar.trim();
-      if (!n || !ph || !cm) {
+      const cm = newClientCar.trim() || "—";
+      if (!n || !ph || (!newClientCar.trim() && !isRequestBookingFlow)) {
         setConfirmError("Заполните имя, телефон и автомобиль.");
         return;
       }
@@ -1006,6 +1525,7 @@ export function BookingJournalPage() {
       };
       setClients((prev) => [...prev, newClient]);
       clientTitle = n;
+      clientPhone = ph;
       carLine = formatCarLine(cm, "");
     } else {
       setConfirmError("Заполните данные клиента на шаге 1.");
@@ -1028,6 +1548,7 @@ export function BookingJournalPage() {
       startTime: selectedSlot.startTime,
       endTime: selectedSlot.endTime,
       clientTitle,
+      clientPhone,
       service: selectedService.name,
       car: carLine,
       status: "Подтверждена",
@@ -1038,7 +1559,41 @@ export function BookingJournalPage() {
       title: "Создал запись в Журнале записей",
       description: `№ ${id} · ${clientTitle} · ${timeRange} · ${selectedService.name}`,
     });
-    setJournalRows((prev) => [...prev, row]);
+
+    if (isJournalRemoteEnabled()) {
+      try {
+        const payload: JournalStorageRow = {
+          id: row.id,
+          box_id: row.boxId,
+          master_id: row.masterId,
+          start_time: row.startTime,
+          end_time: row.endTime,
+          client_title: row.clientTitle,
+          client_phone: row.clientPhone ?? "",
+          service: row.service,
+          car: row.car,
+          status: row.status ?? "Подтверждена",
+          status_actor: row.statusActor ?? "manager",
+        };
+        const data = await insertJournalStorageRow(payload);
+        if (data) {
+          setJournalRows((prev) => [...prev, mapStorageJournalRowToUi(data as JournalStorageRow)]);
+        } else {
+          setJournalRows((prev) => [...prev, row]);
+        }
+      } catch (error) {
+        console.warn("Failed to create booking in remote storage, keep local create.", error);
+        setJournalRows((prev) => [...prev, row]);
+      }
+    } else {
+      setJournalRows((prev) => [...prev, row]);
+    }
+
+    emitArchiveStyleToast({
+      line1: `Запись ${clientTitle}`,
+      line2: "добавлена в журнал записей",
+      navigateTo: `/journal?booking=${encodeURIComponent(id)}`,
+    });
     closeNewBookingModal();
   }
 
@@ -1046,8 +1601,202 @@ export function BookingJournalPage() {
   const masterName = selectedSlot ? JOURNAL_MASTERS.find((m) => m.id === selectedSlot.masterId)?.name ?? "" : "";
   const timeLabel = selectedSlot ? `${selectedSlot.startTime.slice(11, 16)} — ${selectedSlot.endTime.slice(11, 16)}` : "";
   const stepSlots = availableSlots;
+  const bookingStatusPickerRow = bookingStatusPickerForId
+    ? journalRows.find((r) => r.id === bookingStatusPickerForId) ?? null
+    : null;
 
   const stepLabels = ["Идентификация", "Тип обращения", "Время", "Подтверждение"] as const;
+
+  const bookingCardModalActions: Array<{
+    id: BookingCardActionId;
+    label: string;
+    Icon: ({ className }: { className?: string }) => JSX.Element;
+    danger?: boolean;
+  }> = [
+    { id: "moveToWorkOrder", label: "Переместить в заказ-наряд", Icon: RequestActionIconGetJob },
+    { id: "status", label: "Изменить статус", Icon: RequestActionIconStatus },
+    { id: "edit", label: "Редактировать", Icon: RequestActionIconEdit },
+    { id: "delete", label: "Удалить запись", Icon: RequestActionIconTrash, danger: true },
+  ];
+
+  async function handleBookingCardAction(actionId: BookingCardActionId) {
+    if (!bookingCardActionsModal) return;
+    if (actionId === "moveToWorkOrder") {
+      const row = journalRows.find((r) => r.id === bookingCardActionsModal.id);
+      const client = row?.clientTitle?.trim() || bookingCardActionsModal.title.trim() || "";
+      const matchedClient = findClientByJournalTitle(clients, client);
+      const phone = row?.clientPhone?.trim() || matchedClient?.phone?.trim() || "";
+      const car = (row ? carTitleOnly(row.car) : "").trim() || carTitleOnly(bookingCardActionsModal.car).trim() || "";
+      const plate = row?.car.split(/\s{2,}/)[1]?.trim() ?? "";
+      const transferToken = `${Date.now()}-${bookingCardActionsModal.id}`;
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem(
+          TRANSFER_TO_WORK_ORDER_DRAFT_KEY,
+          JSON.stringify({ client, phone, car, plate, token: transferToken }),
+        );
+      }
+      setBookingCardActionsModal(null);
+      navigate(
+        `/work-orders?newWorkOrderFromBooking=1&transferToken=${encodeURIComponent(transferToken)}&client=${encodeURIComponent(client)}&phone=${encodeURIComponent(phone)}&car=${encodeURIComponent(car)}&plate=${encodeURIComponent(plate)}`,
+        {
+          state: { transferToWorkOrder: { client, phone, car, plate, token: transferToken } },
+        },
+      );
+      return;
+    }
+    if (actionId === "status") {
+      setBookingStatusPickerForId(bookingCardActionsModal.id);
+      setBookingCardActionsModal(null);
+      return;
+    }
+    if (actionId === "edit") {
+      const row = journalRows.find((r) => r.id === bookingCardActionsModal.id);
+      if (!row) {
+        setBookingCardActionsModal(null);
+        return;
+      }
+      setEditBookingId(row.id);
+      setEditBookingDraft({
+        clientTitle: row.clientTitle,
+        car: carTitleOnly(row.car),
+      });
+      setBookingCardActionsModal(null);
+      return;
+    }
+    if (actionId === "delete") {
+      const removed = bookingCardActionsModal;
+      if (isJournalRemoteEnabled()) {
+        try {
+          await deleteJournalStorageRow(removed.id);
+        } catch (error) {
+          console.warn("Failed to delete journal booking in remote storage.", error);
+          emitArchiveStyleToast({
+            line1: "Не удалось удалить запись",
+            line2: "Проверьте подключение к базе и policy update/delete",
+          });
+          setBookingCardActionsModal(null);
+          return;
+        }
+      }
+      setJournalRows((prev) => prev.filter((row) => row.id !== removed.id));
+      setBookingCardActionsModal(null);
+      emitArchiveStyleToast({
+        line1: `Запись ${removed.title}`,
+        line2: "удалена из журнала записей",
+      });
+      return;
+    }
+    setBookingCardActionsModal(null);
+  }
+
+  async function commitBookingStatus(status: BookingStatus) {
+    if (!bookingStatusPickerForId) return;
+    const targetId = bookingStatusPickerForId;
+    if (isJournalRemoteEnabled()) {
+      try {
+        await updateJournalStorageRows([targetId], { status, status_actor: "manager" as const });
+      } catch (error) {
+        console.warn("Failed to update journal booking status in remote storage.", error);
+        emitArchiveStyleToast({
+          line1: "Не удалось изменить статус",
+          line2: "Проверьте подключение к базе и policy update",
+        });
+        setBookingStatusPickerForId(null);
+        return;
+      }
+    }
+    setJournalRows((prev) =>
+      prev.map((row) =>
+        row.id === targetId
+          ? { ...row, status, statusActor: "manager" as const }
+          : row,
+      ),
+    );
+    setBookingStatusPickerForId(null);
+  }
+
+  async function commitBookingEdit() {
+    if (!editBookingId || !editBookingDraft) return;
+    const targetId = editBookingId;
+    const normalizedClient = editBookingDraft.clientTitle.trim();
+    const normalizedCar = editBookingDraft.car.trim();
+    if (!normalizedClient || !normalizedCar) return;
+    if (isJournalRemoteEnabled()) {
+      try {
+        await updateJournalStorageRows([targetId], {
+          client_title: normalizedClient,
+          car: normalizedCar,
+        });
+      } catch (error) {
+        console.warn("Failed to edit journal booking in remote storage.", error);
+        emitArchiveStyleToast({
+          line1: "Не удалось сохранить изменения",
+          line2: "Проверьте подключение к базе и policy update",
+        });
+        setEditBookingId(null);
+        setEditBookingDraft(null);
+        return;
+      }
+    }
+    setJournalRows((prev) =>
+      prev.map((row) =>
+        row.id === targetId
+          ? {
+              ...row,
+              clientTitle: normalizedClient,
+              car: normalizedCar,
+            }
+          : row,
+      ),
+    );
+    setEditBookingId(null);
+    setEditBookingDraft(null);
+  }
+
+  function handleBoxHeaderAction(actionId: BoxHeaderActionId) {
+    if (!boxHeaderActionsModal) return;
+    if (actionId === "callMaster") {
+      const phoneByMasterId: Record<string, string> = {
+        m1: "+7 (911) 123-45-67",
+        m2: "+7 (911) 166-77-88",
+        m3: "+7 (911) 101-20-30",
+        m4: "+7 (911) 111-22-33",
+      };
+      const phone = phoneByMasterId[boxHeaderActionsModal.masterId] ?? "+7 (911) 123-45-67";
+      const callLink = document.createElement("a");
+      callLink.href = toTelHref(phone);
+      document.body.appendChild(callLink);
+      callLink.click();
+      document.body.removeChild(callLink);
+      setBoxHeaderActionsModal(null);
+      return;
+    }
+    if (actionId === "changeMaster") {
+      setAssignModalBoxId(boxHeaderActionsModal.boxId);
+      setAssignModalSelectedMasterId(boxHeaderActionsModal.masterId);
+      setBoxHeaderActionsModal(null);
+      return;
+    }
+    if (actionId === "removeMaster") {
+      setAssignedMastersByDateBox((prev) => {
+        const key = assignmentKey(journalViewDate, boxHeaderActionsModal.boxId);
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      setBoxHeaderActionsModal(null);
+    }
+  }
+
+  function navigateToWorkOrderFromCard(text: string) {
+    const workOrderId = extractWorkOrderIdFromCardText(text);
+    if (!workOrderId) return;
+    if (typeof window !== "undefined") {
+      window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, workOrderId);
+    }
+    navigate(`/work-orders?workOrder=${workOrderId}`);
+  }
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.04em]">
@@ -1055,7 +1804,6 @@ export function BookingJournalPage() {
         <div className="flex h-full w-full rounded-[16px] bg-black p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
           <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
             <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/dashboard")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="home" /></button>
             <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
             <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="layers" /></button>
             <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
@@ -1118,7 +1866,7 @@ export function BookingJournalPage() {
                     type="search"
                     value={journalSearchQuery}
                     onChange={(e) => setJournalSearchQuery(e.target.value)}
-                    className="journal-header-search h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-[#8A8A8A] outline-none placeholder:text-[#B5B5B5] [color-scheme:light]"
+                    className="journal-header-search h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light]"
                     placeholder="Найти заявку..."
                     aria-label="Найти заявку"
                   />
@@ -1180,7 +1928,7 @@ export function BookingJournalPage() {
                 return (
                 <div key={column.title} className="relative border-r border-[#ECEEF1] last:border-r-0">
                   <div className="flex h-[68px] items-center justify-center border-b border-[#ECEEF1] px-4 py-2">
-                    {isAllSlotsFreeDay && !hasAssignedMasterForDateBox ? (
+                    {!hasAssignedMasterForDateBox ? (
                       <button
                         type="button"
                         onClick={() => {
@@ -1192,7 +1940,21 @@ export function BookingJournalPage() {
                         Назначить на {column.title}
                       </button>
                     ) : (
-                      <div className="mx-auto inline-flex items-center justify-center gap-[12px]">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setBoxHeaderActionsModal({
+                            boxId,
+                            boxTitle: column.title,
+                            masterName: columnMaster?.name ?? column.worker,
+                            masterId: columnMasterId,
+                          });
+                        }}
+                        className="mx-auto inline-flex cursor-pointer items-center justify-center gap-[12px] rounded-[10px] px-2 py-1"
+                        aria-haspopup="dialog"
+                        aria-expanded={Boolean(boxHeaderActionsModal && boxHeaderActionsModal.boxId === boxId)}
+                        aria-label={`Действия для ${column.title}`}
+                      >
                         <span className="inline-flex h-[37px] w-[37px] shrink-0 items-center justify-center self-center overflow-hidden rounded-full bg-[#F3F3F5]">
                           {columnMaster?.photoUrl ? (
                             <img
@@ -1205,10 +1967,10 @@ export function BookingJournalPage() {
                           )}
                         </span>
                         <div className="inline-flex flex-col items-start justify-center gap-1">
-                          <p className="text-[20px] font-semibold leading-none">{column.worker}</p>
+                          <p className="text-[20px] font-semibold leading-none">{columnMaster?.name ?? column.worker}</p>
                           <p className="text-[13px] font-medium leading-none text-[#7D7D81]">{column.title}</p>
                         </div>
-                      </div>
+                      </button>
                     )}
                   </div>
 
@@ -1251,7 +2013,7 @@ export function BookingJournalPage() {
                                   className="pointer-events-auto shrink-0 cursor-pointer rounded-lg bg-[#EC1C24] px-4 py-2 text-[13px] font-medium text-white shadow-sm"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    openNewBookingModal({
+                                    tryOpenNewBookingModal({
                                       boxId,
                                       startIso: `${journalViewDate}T${startHHmm}:00`,
                                       gapEndMinute: uiEndMin,
@@ -1284,9 +2046,7 @@ export function BookingJournalPage() {
                             ? "pointer-events-none z-[8] opacity-[0.22] grayscale"
                             : "z-10"
                         } ${highlighted ? "z-[12] shadow-[0_0_0_2px_#F31624]" : ""} ${
-                          bookingHighlightId === card.id
-                            ? "z-[22] shadow-[0_0_0_3px_#EC1C24,0_8px_28px_-6px_rgba(236,28,36,0.35)]"
-                            : ""
+                          flashBookingId === card.id ? "z-[22] animate-[bookingCardHighlightBorder_4s_ease-out]" : ""
                         }`}
                         style={{ top: calcTop(card.start), height: calcCardHeightInclusive(card.start, card.end) }}
                       >
@@ -1296,8 +2056,40 @@ export function BookingJournalPage() {
                           }`}
                         >
                           <span>{card.start}–{card.end}</span>
+                          <button
+                            type="button"
+                            className="ml-auto inline-flex cursor-pointer items-center justify-center text-current transition-colors hover:text-black"
+                            aria-label={`Действия для записи ${card.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setBookingCardActionsModal(card);
+                            }}
+                          >
+                            <svg viewBox="0 0 20 16" fill="none" className="h-[20px] w-[24px]">
+                              <circle cx="4.5" cy="8" r="1.9" fill="currentColor" />
+                              <circle cx="10" cy="8" r="1.9" fill="currentColor" />
+                              <circle cx="15.5" cy="8" r="1.9" fill="currentColor" />
+                            </svg>
+                          </button>
                         </div>
-                        <p className="mt-1 shrink-0 truncate text-[17px] font-semibold leading-[1.28]">{card.title}</p>
+                        <div className="mt-1 flex w-full items-center gap-2">
+                          <p
+                            className={`min-w-0 truncate text-[17px] font-semibold leading-[1.28] ${card.phone ? "cursor-default" : ""}`}
+                            onMouseEnter={(e) => {
+                              if (!card.phone) return;
+                              const p = clampClientPhoneTooltipPos(e.clientX, e.clientY, card.phone);
+                              setClientPhoneTooltip({ text: formatPhoneForCardTooltip(card.phone), x: p.x, y: p.y, maxWidth: p.maxWidth });
+                            }}
+                            onMouseMove={(e) => {
+                              if (!card.phone) return;
+                              const p = clampClientPhoneTooltipPos(e.clientX, e.clientY, card.phone);
+                              setClientPhoneTooltip({ text: formatPhoneForCardTooltip(card.phone), x: p.x, y: p.y, maxWidth: p.maxWidth });
+                            }}
+                            onMouseLeave={() => setClientPhoneTooltip(null)}
+                          >
+                            {card.title}
+                          </p>
+                        </div>
                         <p className="mt-0.5 shrink-0 truncate text-[13px] font-medium leading-[1.3] text-[#2E3642]">{carTitleOnly(card.car)}</p>
                         <p className="mt-0.5 shrink-0 truncate text-[13px] font-medium leading-[1.3] text-[#2E3642]">{card.service}</p>
                         {card.status ? (
@@ -1568,7 +2360,7 @@ export function BookingJournalPage() {
                             }}
                           />
                           {matchedBySurname.length > 0 ? (
-                            <div className="mt-4 space-y-3">
+                            <div className="mt-4 max-h-[276px] space-y-3 overflow-y-auto pr-1">
                               {matchedBySurname.map((c) => (
                                 <div key={c.id} className="rounded-[10px] bg-[#ECECEF] p-3">
                                   <p className="text-[15px] font-semibold text-[#111826]">{c.name}</p>
@@ -1652,6 +2444,14 @@ export function BookingJournalPage() {
 
                   {currentStep === 2 ? (
                     <>
+                      {isRequestBookingFlow && requestBookingComment ? (
+                        <>
+                          <label className="mt-5 block text-[14px] font-medium text-[#5A6472]">Комментарий клиента</label>
+                          <div className="mt-1.5 rounded-[10px] border-[3px] border-[#E4E5E7] bg-[#F8F8FA] px-3 py-3 text-[16px] font-medium tracking-[-0.04em] text-[#2E3642]">
+                            {requestBookingComment}
+                          </div>
+                        </>
+                      ) : null}
                       <label className="mt-5 block text-[14px] font-medium text-[#5A6472]">Тип обращения</label>
                       <div className="relative mt-1.5">
                         <button
@@ -1866,6 +2666,173 @@ export function BookingJournalPage() {
           </main>
         </div>
       </div>
+      {bookingCardActionsModal && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[260] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setBookingCardActionsModal(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="booking-actions-title"
+                className="w-full max-w-[360px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="booking-actions-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Действия с записью
+                  </h2>
+                  <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    {bookingCardActionsModal.title}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  {bookingCardModalActions.map(({ id, label, Icon, danger }) => {
+                    const iconTone = danger ? "text-[#EC1C24]" : "text-[#4B5563]";
+                    return (
+                      <li key={id}>
+                        <button
+                          type="button"
+                          className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                            danger ? "text-[#EC1C24] hover:bg-[#EC1C24]/10" : "text-[#111826] hover:bg-[#F3F3F5]"
+                          }`}
+                          onClick={() => handleBookingCardAction(id)}
+                        >
+                          <Icon className={iconTone} />
+                          {label}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {bookingStatusPickerRow && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[265] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setBookingStatusPickerForId(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="booking-status-title"
+                className="w-full max-w-[360px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="booking-status-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Изменить статус записи
+                  </h2>
+                  <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    № {bookingStatusPickerRow.id} · {bookingStatusPickerRow.clientTitle}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  {(["Подтверждена", "Ожидает клиента", "В работе", "Завершена", "Клиент не приехал", "Отменена"] as const).map((status) => (
+                    <li key={status}>
+                      <button
+                        type="button"
+                        className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                          bookingStatusPickerRow.status === status
+                            ? "bg-[#F8F8FA] text-[#111826]"
+                            : "text-[#111826] hover:bg-[#F3F3F5]"
+                        }`}
+                        onClick={() => commitBookingStatus(status)}
+                      >
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: JOURNAL_STATUS_DOT_COLOR[status] }} />
+                        <span className="min-w-0 flex-1">{status}</span>
+                        {bookingStatusPickerRow.status === status ? (
+                          <span className="shrink-0 text-[13px] font-medium text-[#7D7D7D]">Сейчас</span>
+                        ) : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <div className="border-t border-[#EEEDF0] p-5">
+                  <button
+                    type="button"
+                    onClick={() => setBookingStatusPickerForId(null)}
+                    className="w-full cursor-pointer rounded-[10px] bg-[#ECECEF] p-4 text-center text-[16px] font-medium tracking-[-0.04em] text-[#111111] transition-colors hover:bg-[#E0E0E4]"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {editBookingId && editBookingDraft && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[263] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => {
+                setEditBookingId(null);
+                setEditBookingDraft(null);
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="edit-booking-title"
+                className="w-full max-w-[560px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="edit-booking-title" className="text-[20px] font-bold tracking-[-0.04em] text-[#111826]">
+                    Редактировать запись
+                  </h2>
+                </div>
+                <div className="flex flex-col gap-3 p-5">
+                  <input
+                    value={editBookingDraft.clientTitle}
+                    onChange={(e) =>
+                      setEditBookingDraft((prev) => (prev ? { ...prev, clientTitle: e.target.value } : prev))
+                    }
+                    className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                    placeholder="ФИО"
+                  />
+                  <input
+                    value={editBookingDraft.car}
+                    onChange={(e) =>
+                      setEditBookingDraft((prev) => (prev ? { ...prev, car: e.target.value } : prev))
+                    }
+                    className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                    placeholder="Автомобиль"
+                  />
+                </div>
+                <div className="flex gap-2 border-t border-[#EEEDF0] p-5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditBookingId(null);
+                      setEditBookingDraft(null);
+                    }}
+                    className="flex-1 h-11 rounded-[10px] bg-[#ECECEF] px-4 text-center text-[15px] font-medium tracking-[-0.04em] text-black"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    onClick={commitBookingEdit}
+                    className="flex-1 h-11 rounded-[10px] border-2 border-[#EC1C24] bg-[#EC1C24] px-5 text-center text-[15px] font-medium tracking-[-0.04em] text-white"
+                  >
+                    Сохранить
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       {bookingSoonNotice && typeof document !== "undefined"
         ? createPortal(
             <div className="pointer-events-none fixed bottom-4 right-4 z-[500]">
@@ -1886,6 +2853,364 @@ export function BookingJournalPage() {
                 <span className="ml-auto inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#EC1C24] text-white">
                   <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
                 </span>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {clientPhoneTooltip && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              role="tooltip"
+              className="pointer-events-none fixed z-[200] max-h-[min(280px,calc(100vh-16px))] w-max min-w-0 overflow-y-auto rounded-xl border border-[#E4E5E7] bg-white px-3 py-2.5 text-left text-[14px] font-medium leading-relaxed whitespace-pre-wrap break-words text-[#111826] shadow-[0_12px_40px_-8px_rgba(0,0,0,0.35)]"
+              style={{ left: clientPhoneTooltip.x, top: clientPhoneTooltip.y, maxWidth: clientPhoneTooltip.maxWidth }}
+            >
+              {clientPhoneTooltip.text}
+            </div>,
+            document.body,
+          )
+        : null}
+      {boxHeaderActionsModal && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[258] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setBoxHeaderActionsModal(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="box-header-actions-title"
+                className="w-full max-w-[360px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="box-header-actions-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Действия с боксом
+                  </h2>
+                  <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    {boxHeaderActionsModal.masterName} · {boxHeaderActionsModal.boxTitle}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  <li>
+                    <button
+                      type="button"
+                      className="flex w-full cursor-pointer items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] text-[#111826] transition-colors hover:bg-[#F3F3F5]"
+                      onClick={() => {
+                        const snap = boxHeaderActionsModal;
+                        setBoxHeaderActionsModal(null);
+                        if (!snap) return;
+                        if (openProfileTimerRef.current) {
+                          clearTimeout(openProfileTimerRef.current);
+                          openProfileTimerRef.current = null;
+                        }
+                        openProfileTimerRef.current = setTimeout(() => {
+                          setEmployeeProfileSnapshot({ masterId: snap.masterId });
+                          setEmployeeProfileModal({ masterId: snap.masterId });
+                          setEmployeeProfileTab("main");
+                          setEmployeeOrdersSection("active");
+                          openProfileTimerRef.current = null;
+                        }, 140);
+                      }}
+                    >
+                      <BoxHeaderActionIcon type="profile" className="h-5 w-5 shrink-0 text-[#4B5563]" />
+                      Открыть профиль
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      className="flex w-full cursor-pointer items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] text-[#111826] transition-colors hover:bg-[#F3F3F5]"
+                      onClick={() => handleBoxHeaderAction("callMaster")}
+                    >
+                      <BoxHeaderActionIcon type="call" className="h-5 w-5 shrink-0 text-[#4B5563]" />
+                      Позвонить мастеру
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      className="flex w-full cursor-pointer items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] text-[#111826] transition-colors hover:bg-[#F3F3F5]"
+                      onClick={() => handleBoxHeaderAction("changeMaster")}
+                    >
+                      <BoxHeaderActionIcon type="switch" className="h-5 w-5 shrink-0 text-[#4B5563]" />
+                      Сменить мастера
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      className="flex w-full cursor-pointer items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] text-[#EC1C24] transition-colors hover:bg-[#EC1C24]/10"
+                      onClick={() => handleBoxHeaderAction("removeMaster")}
+                    >
+                      <BoxHeaderActionIcon type="remove" className="h-5 w-5 shrink-0 text-[#EC1C24]" />
+                      Снять мастера
+                    </button>
+                  </li>
+                </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {employeeProfileMounted && employeeProfileSnapshot && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className={`fixed inset-0 z-[285] bg-black/35 transition-[opacity] ${employeeProfileActive ? "opacity-100" : "opacity-0"}`}
+              style={{ transitionDuration: "400ms", transitionTimingFunction: "cubic-bezier(0.45, 0, 0.55, 1)" }}
+              role="presentation"
+              onClick={() => setEmployeeProfileModal(null)}
+            >
+              <div className="ml-auto flex h-full max-h-screen justify-end" onClick={(e) => e.stopPropagation()}>
+                <div
+                  className="relative flex h-full shrink-0"
+                  style={{
+                    transform: employeeProfileActive ? "translate3d(0, 0, 0)" : "translate3d(100%, 0, 0)",
+                    transition: "transform 480ms cubic-bezier(0.45, 0, 0.55, 1)",
+                    willChange: "transform",
+                    backfaceVisibility: "hidden",
+                    WebkitBackfaceVisibility: "hidden",
+                  }}
+                  onTransitionEnd={handleProfileDrawerTransitionEnd}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setEmployeeProfileModal(null)}
+                    className="absolute right-full top-8 z-10 mr-3 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#E8E8E8] bg-white text-[#111111] shadow-[0_8px_24px_-4px_rgba(0,0,0,0.18)] transition hover:bg-[#F7F7F7]"
+                    aria-label="Закрыть профиль сотрудника"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden>
+                      <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                  <aside
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="employee-profile-title"
+                    className="flex h-full w-[min(900px,58vw)] min-w-[380px] max-w-[min(1040px,calc(100vw-48px))] flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)]"
+                  >
+                    <div className="flex items-center gap-3 border-b border-[#EFEFEF] px-5 py-4">
+                      <h2 id="employee-profile-title" className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">
+                        Профиль мастера
+                      </h2>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto scroll-smooth p-5">
+                      {employeeProfileTab === "main" ? (
+                        <section className="relative min-h-0 rounded-[16px] bg-white">
+                          <div className="flex items-start justify-between gap-4">
+                            <div>
+                              <h1 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
+                                <span className="block whitespace-nowrap">{profileMasterFirstLine}</span>
+                                <span className="block">{profileMasterSecondLine || "\u00A0"}</span>
+                              </h1>
+                            </div>
+                            <img src={profileMasterPhotoLarge} alt={`Фото профиля: ${profileMasterFullName}`} className="h-[72px] w-[72px] rounded-full object-cover" />
+                          </div>
+                          <div className="mt-[50px]">
+                            <div className="grid grid-cols-2 gap-x-3 gap-y-4">
+                              {[
+                                { label: "Дата рождения", value: profileMasterMeta.birthDate },
+                                { label: "Пол", value: profileMasterMeta.gender },
+                                { label: "Гражданство", value: profileMasterMeta.citizenship },
+                                { label: "Телефон", value: profileMasterMeta.phone },
+                                { label: "E-mail", value: profileMasterMeta.email },
+                                { label: "Должность", value: profileMasterMeta.role },
+                                { label: "График работы", value: profileMasterMeta.schedule },
+                                { label: "Статус", value: profileMasterMeta.status },
+                              ].map((field) => (
+                                <div key={field.label} className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                  <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">{field.label}</p>
+                                  <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">{field.value}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </section>
+                      ) : employeeProfileTab === "kpi" ? (
+                        <section className="min-h-0 rounded-[16px] bg-white">
+                          <div className="grid grid-cols-2 gap-3">
+                            {employeeKpiCards.map((card) => (
+                              <article key={card.title} className="flex h-[128px] flex-col rounded-[12px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[16px] font-medium leading-none tracking-[-0.04em] text-[#1D2330]">{card.title}</p>
+                                <div className="mt-auto">
+                                  <p className="text-[32px] font-medium leading-none tracking-[-0.04em] text-[#E00919]">{card.value}</p>
+                                  <p className="mt-1 text-[13px] font-medium tracking-[-0.04em] text-[#6F7785]">{card.note}</p>
+                                </div>
+                              </article>
+                            ))}
+                          </div>
+                        </section>
+                      ) : (
+                        <section className="rounded-[16px] bg-white">
+                          <div className="inline-flex w-fit items-center gap-1 rounded-full p-1">
+                            {[
+                              { id: "active" as const, label: "Активные" },
+                              { id: "recentlyDone" as const, label: "Недавно завершенные" },
+                            ].map((tab) => (
+                              <button
+                                key={tab.id}
+                                type="button"
+                                onClick={() => setEmployeeOrdersSection(tab.id)}
+                                className={`rounded-full px-4 py-2 text-[14px] font-medium tracking-[-0.02em] text-black ${employeeOrdersSection === tab.id ? "bg-[#F8F8FA]" : "bg-transparent"}`}
+                              >
+                                {tab.label}
+                              </button>
+                            ))}
+                          </div>
+                          {employeeOrdersSection === "active" ? (
+                            <div className="mt-4 space-y-4">
+                              {masterActiveOrderItems.length > 0 ? (
+                                masterActiveOrderItems.map((item) => {
+                                  const [titlePart, ...restParts] = item.text.split(" · ");
+                                  const detailsPart = restParts.join(" · ");
+                                  return (
+                                    <article key={item.text} className="flex items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3">
+                                      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
+                                        <img src={item.icon} alt="" className="h-5 w-5" />
+                                      </span>
+                                      <p className="text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">
+                                        <span className="text-[#111826]">{titlePart}</span>
+                                        {detailsPart ? ` · ${detailsPart}` : ""}
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={() => navigateToWorkOrderFromCard(item.text)}
+                                        className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#EC1C24] text-white"
+                                      >
+                                        <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
+                                      </button>
+                                    </article>
+                                  );
+                                })
+                              ) : (
+                                <div className="rounded-[12px] bg-[#F3F3F5] px-4 py-3 text-[15px] font-medium tracking-[-0.04em] text-[#6F7785]">
+                                  Активных заказ-нарядов нет.
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="mt-4 space-y-4">
+                              {masterCompletedOrderItems.length > 0 ? (
+                                masterCompletedOrderItems.map((item) => {
+                                  const [titlePart, ...restParts] = item.text.split(" · ");
+                                  const detailsPart = restParts.join(" · ");
+                                  return (
+                                    <article key={item.text} className="flex items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3">
+                                      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
+                                        <img src={item.icon} alt="" className="h-5 w-5" />
+                                      </span>
+                                      <p className="text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">
+                                        <span className="text-[#111826]">{titlePart}</span>
+                                        {detailsPart ? ` · ${detailsPart}` : ""}
+                                      </p>
+                                      <button
+                                        type="button"
+                                        onClick={() => navigateToWorkOrderFromCard(item.text)}
+                                        className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#EC1C24] text-white"
+                                      >
+                                        <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
+                                      </button>
+                                    </article>
+                                  );
+                                })
+                              ) : (
+                                <div className="rounded-[12px] bg-[#F3F3F5] px-4 py-3 text-[15px] font-medium tracking-[-0.04em] text-[#6F7785]">
+                                  Недавно завершенных заказ-нарядов нет.
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </section>
+                      )}
+                    </div>
+                    <div className="shrink-0 px-5 pb-5">
+                      <div className="flex justify-center">
+                        <div className="relative inline-grid grid-cols-3 rounded-full bg-[#11131D] p-1 text-[12px] shadow-[0_8px_24px_-14px_rgba(0,0,0,0.8)]">
+                          <span
+                            className={`absolute left-1 top-1 bottom-1 z-0 w-[136px] rounded-full bg-[#EC1C24] shadow-[0_6px_14px_-8px_rgba(236,28,36,0.85)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                              employeeProfileTab === "main" ? "translate-x-0" : employeeProfileTab === "kpi" ? "translate-x-[136px]" : "translate-x-[272px]"
+                            }`}
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setEmployeeProfileTab("main")}
+                            className={`relative z-10 w-[136px] whitespace-nowrap rounded-full px-4 py-2 text-center text-[15px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                              employeeProfileTab === "main" ? "text-white" : "text-white/80 hover:text-white"
+                            }`}
+                          >
+                            Основное
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEmployeeProfileTab("kpi")}
+                            className={`relative z-10 w-[136px] whitespace-nowrap rounded-full px-4 py-2 text-center text-[15px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                              employeeProfileTab === "kpi" ? "text-white" : "text-white/80 hover:text-white"
+                            }`}
+                          >
+                            KPI
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEmployeeProfileTab("orders")}
+                            className={`relative z-10 w-[136px] whitespace-nowrap rounded-full px-4 py-2 text-center text-[15px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                              employeeProfileTab === "orders" ? "text-white" : "text-white/80 hover:text-white"
+                            }`}
+                          >
+                            Заказ-наряды
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {missingMasterPrompt && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[259] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setMissingMasterPrompt(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="missing-master-title"
+                className="w-full max-w-[420px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="missing-master-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Назначьте мастера на бокс
+                  </h2>
+                  <p className="mt-1 text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    Для создания записи назначьте мастера на {missingMasterPrompt.boxTitle}.
+                  </p>
+                </div>
+                <div className="flex gap-2 p-5">
+                  <button
+                    type="button"
+                    onClick={() => setMissingMasterPrompt(null)}
+                    className="h-11 flex-1 cursor-pointer rounded-[10px] bg-[#ECECEF] px-4 text-center text-[15px] font-medium tracking-[-0.04em] text-black"
+                  >
+                    Закрыть
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAssignModalBoxId(missingMasterPrompt.boxId);
+                      setAssignModalSelectedMasterId(null);
+                      setMissingMasterPrompt(null);
+                    }}
+                    className="h-11 flex-1 cursor-pointer rounded-[10px] border-2 border-[#EC1C24] bg-[#EC1C24] px-4 text-center text-[15px] font-medium tracking-[-0.04em] text-white"
+                  >
+                    Назначить мастера
+                  </button>
+                </div>
               </div>
             </div>,
             document.body,
@@ -2013,6 +3338,20 @@ export function BookingJournalPage() {
             100% {
               opacity: 0;
               transform: translateY(8px) scale(0.98);
+            }
+          }
+          @keyframes bookingCardHighlightBorder {
+            0% {
+              box-shadow: 0 0 0 0 rgba(236, 28, 36, 0), 0 8px 28px -6px rgba(236, 28, 36, 0);
+            }
+            20% {
+              box-shadow: 0 0 0 3px #EC1C24, 0 8px 28px -6px rgba(236, 28, 36, 0.35);
+            }
+            70% {
+              box-shadow: 0 0 0 3px #EC1C24, 0 8px 28px -6px rgba(236, 28, 36, 0.2);
+            }
+            100% {
+              box-shadow: 0 0 0 0 rgba(236, 28, 36, 0), 0 8px 28px -6px rgba(236, 28, 36, 0);
             }
           }
           .service-menu-scroll {
