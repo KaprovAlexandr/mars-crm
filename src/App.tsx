@@ -11,6 +11,7 @@ import { RequestDetailsPage } from "@/components/pages/RequestDetailsPage";
 import { RequestsListPage } from "@/components/pages/RequestsListPage";
 import { SettingsPage } from "@/components/pages/SettingsPage";
 import { PromoLandingPage } from "@/components/pages/PromoLandingPage";
+import { TestRequestFormPage } from "@/components/pages/TestRequestFormPage";
 import { WorkOrdersPage } from "@/components/pages/WorkOrdersPage";
 import { WorkOrdersDetailsPage } from "@/components/pages/WorkOrdersDetailsPage";
 
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="/work-orders" element={<WorkOrdersPage />} />
         <Route path="/work-orders/:id" element={<WorkOrdersDetailsPage />} />
         <Route path="/promo" element={<PromoLandingPage />} />
+        <Route path="/test-request-form" element={<TestRequestFormPage />} />
         <Route path="/clients/:id" element={<ClientDetailsPage2 />} />
         <Route path="/requests/:id" element={<RequestDetailsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

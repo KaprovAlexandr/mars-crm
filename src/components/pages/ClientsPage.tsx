@@ -1,10 +1,18 @@
 import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
 import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
 import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
+import { useEffect, useMemo, useRef, useState, type TransitionEvent } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { clientsData, type ClientRow } from "@/lib/mock/clients-page";
+import {
+  insertClientStorageRow,
+  isClientsRemoteEnabled,
+  listClientsStorageRows,
+  type ClientStorageRow,
+} from "@/lib/data/clientsDataSource";
 
 type ClientTableRow = {
   id: string;
@@ -44,8 +52,32 @@ const REVENUE_BRACKET_LABELS: Record<RevenueBracket, string> = {
 };
 type SortKey = "id" | "fullName" | "phone" | "requestsCount" | "lastVisit" | "totalAmount";
 type SortDir = "asc" | "desc";
+type ClientActionId = "open" | "call" | "notify" | "createBooking" | "createWorkOrder";
+type ClientType = "person" | "company" | "entrepreneur" | "";
+
+type CreateClientDraft = {
+  clientType: ClientType;
+  fullName: string;
+  orgName: string;
+  inn: string;
+  phone: string;
+  email: string;
+  car: string;
+  plate: string;
+};
 
 const PAGE_SIZE = 12;
+
+const EMPTY_CREATE_CLIENT_DRAFT: CreateClientDraft = {
+  clientType: "",
+  fullName: "",
+  orgName: "",
+  inn: "",
+  phone: "",
+  email: "",
+  car: "",
+  plate: "",
+};
 
 function mapClientRow(c: ClientRow): ClientTableRow {
   return {
@@ -125,6 +157,39 @@ function parseAmountRub(s: string): number {
   return digits ? parseInt(digits, 10) : 0;
 }
 
+function maskRuPhoneInput(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  const hasEightPrefix = digits.startsWith("8");
+  const normalized = hasEightPrefix ? digits.slice(1) : digits.startsWith("7") ? digits.slice(1) : digits;
+  const national = normalized.slice(0, 10);
+  if (!national) return "";
+  const p1 = national.slice(0, 3);
+  const p2 = national.slice(3, 6);
+  const p3 = national.slice(6, 8);
+  const p4 = national.slice(8, 10);
+  let out = "+7";
+  if (p1) out += ` (${p1}`;
+  if (p1.length === 3) out += ")";
+  if (p2) out += ` ${p2}`;
+  if (p3) out += `-${p3}`;
+  if (p4) out += `-${p4}`;
+  return out;
+}
+
+function national10FromPhoneInput(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  if (digits.startsWith("8")) return digits.slice(1, 11);
+  if (digits.startsWith("7")) return digits.slice(1, 11);
+  return digits.slice(0, 10);
+}
+
+function formatDateRu(d: Date): string {
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  return `${dd}.${mm}.${yyyy}`;
+}
+
 /** Стабильное «рандомное» число 1…18 по id, если в данных нет корректного количества */
 function requestsCountForClient(c: ClientRow): number {
   const raw = c.requestsCount;
@@ -165,6 +230,22 @@ function SortIcon() {
   );
 }
 
+function toTelHref(phone: string): string {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return "tel:+7";
+  if (digits.startsWith("8") && digits.length >= 11) return `tel:+7${digits.slice(1)}`;
+  if (digits.startsWith("7") && digits.length >= 11) return `tel:+${digits}`;
+  return `tel:+7${digits}`;
+}
+
+function ClientActionIcon({ type, className }: { type: ClientActionId; className?: string }) {
+  if (type === "open") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M9 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /><path d="M14 4h6v6M20 4l-9 9" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+  if (type === "call") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M7.2 5.5C7.5 5 8 4.8 8.6 4.9L10.9 5.3C11.5 5.4 11.9 5.8 12 6.4L12.4 8.5C12.5 9 12.3 9.5 11.9 9.9L10.8 11C11.5 12.3 12.6 13.4 13.9 14.2L15 13.1C15.4 12.7 15.9 12.5 16.4 12.6L18.5 13C19.1 13.1 19.5 13.5 19.6 14.1L20 16.4C20.1 17 19.9 17.5 19.4 17.8L17.8 18.9C17.2 19.3 16.5 19.4 15.8 19.2C13.4 18.5 11.2 17.2 9.4 15.4C7.6 13.6 6.3 11.4 5.6 9C5.4 8.3 5.5 7.6 5.9 7L7.2 5.5Z" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+  if (type === "notify") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M18 9a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /><path d="M13.7 21a2 2 0 01-3.4 0" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /></svg>;
+  if (type === "createBooking") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><rect x="4" y="5" width="16" height="15" rx="2" stroke="currentColor" strokeWidth="1.9" /><path d="M8 3v4M16 3v4M4 10h16M12 13v4M10 15h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /></svg>;
+  return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M5 7h14M5 12h14M5 17h8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /><path d="M17 16l3 3m0-3l-3 3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /></svg>;
+}
+
 function exportClientsToXlsx(clients: ClientTableRow[]) {
   const data = clients.map((r) => ({
     ID: r.id,
@@ -189,6 +270,17 @@ const FILTER_KEYS: { id: ClientsFilterId; label: string }[] = [
 
 const INITIAL_CLIENT_ROWS: ClientTableRow[] = clientsData.map(mapClientRow);
 
+function mapClientStorageToUi(row: ClientStorageRow): ClientTableRow {
+  return {
+    id: row.id,
+    fullName: row.full_name,
+    phone: row.phone,
+    requestsCount: Number.isFinite(Number(row.requests_count)) ? Number(row.requests_count) : 0,
+    lastVisit: row.last_visit,
+    totalAmount: row.total_amount,
+  };
+}
+
 export function ClientsPage() {
   const navigate = useNavigate();
   const isManager = CURRENT_USER_ROLE === "manager";
@@ -196,16 +288,40 @@ export function ClientsPage() {
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   const [openFilter, setOpenFilter] = useState<ClientsFilterId | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
-  const [rows] = useState<ClientTableRow[]>(() => INITIAL_CLIENT_ROWS.map((r) => ({ ...r })));
+  const [rows, setRows] = useState<ClientTableRow[]>(() =>
+    isClientsRemoteEnabled() ? [] : INITIAL_CLIENT_ROWS.map((r) => ({ ...r })),
+  );
   const [visitPresets, setVisitPresets] = useState<Set<VisitPreset>>(() => new Set(ALL_VISIT_PRESETS));
   const [ordersBrackets, setOrdersBrackets] = useState<Set<OrdersBracket>>(() => new Set(ALL_ORDERS_BRACKETS));
   const [revenueBrackets, setRevenueBrackets] = useState<Set<RevenueBracket>>(() => new Set(ALL_REVENUE_BRACKETS));
   const [newClientsOnly, setNewClientsOnly] = useState(false);
   const [notVisited3mQuick, setNotVisited3mQuick] = useState(false);
   const [topRevenueOnly, setTopRevenueOnly] = useState(false);
-  const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
   const [sortState, setSortState] = useState<{ key: SortKey; dir: SortDir } | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [clientActionsModal, setClientActionsModal] = useState<ClientTableRow | null>(null);
+  const [createClientModalMounted, setCreateClientModalMounted] = useState(false);
+  const [createClientModalActive, setCreateClientModalActive] = useState(false);
+  const [createClientDraft, setCreateClientDraft] = useState<CreateClientDraft>(EMPTY_CREATE_CLIENT_DRAFT);
+
+  useEffect(() => {
+    if (!isClientsRemoteEnabled()) return;
+    let cancelled = false;
+    async function loadClientsFromApi() {
+      try {
+        const data = await listClientsStorageRows();
+        if (!cancelled && Array.isArray(data)) {
+          setRows(data.map((row) => mapClientStorageToUi(row as ClientStorageRow)));
+        }
+      } catch (error) {
+        console.warn("Failed to load clients from API.", error);
+      }
+    }
+    void loadClientsFromApi();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     function onPointerDown(e: PointerEvent) {
@@ -334,8 +450,6 @@ export function ClientsPage() {
 
   const totalClients = rows.length;
 
-  const allPageRowsSelected = pagedRows.length > 0 && pagedRows.every((r) => selectedRowIds.has(r.id));
-
   function resetFilters() {
     setSearchQuery("");
     setOpenFilter(null);
@@ -345,7 +459,6 @@ export function ClientsPage() {
     setNewClientsOnly(false);
     setNotVisited3mQuick(false);
     setTopRevenueOnly(false);
-    setSelectedRowIds(new Set());
   }
 
   function toggleSort(key: SortKey) {
@@ -356,28 +469,102 @@ export function ClientsPage() {
     });
   }
 
-  function toggleRowSelection(id: string) {
-    setSelectedRowIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  function handleClientAction(actionId: ClientActionId) {
+    if (!clientActionsModal) return;
+    const row = clientActionsModal;
+    if (actionId === "open") {
+      setClientActionsModal(null);
+      navigate(`/clients/${row.id}`);
+      return;
+    }
+    if (actionId === "call") {
+      const a = document.createElement("a");
+      a.href = toTelHref(row.phone);
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setClientActionsModal(null);
+      return;
+    }
+    if (actionId === "notify") {
+      emitArchiveStyleToast({ line1: row.fullName, line2: "уведомление отправлено" });
+      setClientActionsModal(null);
+      return;
+    }
+    if (actionId === "createBooking") {
+      setClientActionsModal(null);
+      navigate(
+        `/journal?newBookingFromRequest=1&client=${encodeURIComponent(row.fullName)}&phone=${encodeURIComponent(row.phone)}&comment=${encodeURIComponent("")}`,
+      );
+      return;
+    }
+    setClientActionsModal(null);
+    navigate(`/work-orders?client=${encodeURIComponent(row.fullName)}&phone=${encodeURIComponent(row.phone)}`);
   }
 
-  function toggleSelectAllOnPage() {
-    setSelectedRowIds((prev) => {
-      if (pagedRows.length === 0) return prev;
-      const all = pagedRows.every((r) => prev.has(r.id));
-      if (all) {
-        const next = new Set(prev);
-        pagedRows.forEach((r) => next.delete(r.id));
-        return next;
+  function openCreateClientModal() {
+    setCreateClientDraft(EMPTY_CREATE_CLIENT_DRAFT);
+    setCreateClientModalMounted(true);
+    requestAnimationFrame(() => setCreateClientModalActive(true));
+  }
+
+  function closeCreateClientModal() {
+    setCreateClientModalActive(false);
+  }
+
+  async function handleCreateClientSubmit() {
+    if (!createClientDraft.clientType) return;
+    const fullName =
+      createClientDraft.clientType === "company"
+        ? createClientDraft.orgName.trim()
+        : createClientDraft.fullName.trim();
+    if (!fullName) return;
+
+    const currentMaxId = rows.reduce((max, row) => {
+      const n = Number.parseInt(row.id, 10);
+      return Number.isFinite(n) ? Math.max(max, n) : max;
+    }, 0);
+    const nextId = String(currentMaxId + 1);
+
+    const nextRow: ClientTableRow = {
+      id: nextId,
+      fullName,
+      phone: maskRuPhoneInput(createClientDraft.phone),
+      requestsCount: 0,
+      lastVisit: formatDateRu(new Date()),
+      totalAmount: "0 ₽",
+    };
+
+    if (isClientsRemoteEnabled()) {
+      try {
+        const payload: ClientStorageRow = {
+          id: nextRow.id,
+          full_name: nextRow.fullName,
+          phone: nextRow.phone,
+          requests_count: nextRow.requestsCount,
+          last_visit: nextRow.lastVisit,
+          total_amount: nextRow.totalAmount,
+        };
+        const created = await insertClientStorageRow(payload);
+        setRows((prev) => [mapClientStorageToUi(created), ...prev]);
+      } catch (error) {
+        console.warn("Failed to create client via API.", error);
+        emitArchiveStyleToast({ line1: "Ошибка синхронизации", line2: "Не удалось добавить клиента" });
+        return;
       }
-      const next = new Set(prev);
-      pagedRows.forEach((r) => next.add(r.id));
-      return next;
-    });
+    } else {
+      setRows((prev) => [nextRow, ...prev]);
+    }
+    closeCreateClientModal();
+    emitArchiveStyleToast({ line1: "Клиент добавлен", line2: fullName });
+  }
+
+  function handleCreateClientDrawerTransitionEnd(e: TransitionEvent<HTMLDivElement>) {
+    if (e.propertyName !== "transform") return;
+    if (!createClientModalActive) {
+      setCreateClientModalMounted(false);
+      setCreateClientDraft(EMPTY_CREATE_CLIENT_DRAFT);
+    }
   }
 
   function toggleVisitPreset(p: VisitPreset) {
@@ -445,31 +632,11 @@ export function ClientsPage() {
         <div className={`flex h-full w-full rounded-[16px] p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
           <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
             <button type="button" className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button type="button" onClick={() => navigate("/dashboard")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="home" /></button>
             <button type="button" onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
             <button type="button" onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
             <button type="button" onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
             <button type="button" onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="pie" /></button>
             <div className="mt-auto space-y-2">
-              <button
-                type="button"
-                onClick={() => setIsDarkTheme((prev) => !prev)}
-                className={`grid h-12 w-12 place-items-center rounded-[10px] transition ${
-                  isDarkTheme ? "bg-white text-[#11131D]" : "text-[#8C93A5] hover:bg-white/10"
-                }`}
-                title="Переключить тему"
-              >
-                <svg viewBox="0 0 24 24" fill="none" className="h-[24px] w-[24px]">
-                  {isDarkTheme ? (
-                    <>
-                      <circle cx="12" cy="12" r="4.2" stroke="currentColor" strokeWidth="1.8" />
-                      <path d="M12 2.8V5.1M12 18.9V21.2M2.8 12H5.1M18.9 12H21.2M5.2 5.2L6.9 6.9M17.1 17.1L18.8 18.8M18.8 5.2L17.1 6.9M6.9 17.1L5.2 18.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                    </>
-                  ) : (
-                    <path d="M15.8 3.6C13.8 3.9 11.9 5 10.8 6.7C9.7 8.4 9.5 10.6 10.2 12.5C10.9 14.4 12.3 15.9 14.2 16.7C16.2 17.5 18.4 17.4 20.2 16.4C19.4 18 18.1 19.4 16.5 20.3C14.8 21.2 12.9 21.5 11 21.1C9 20.7 7.2 19.6 5.9 18C4.6 16.4 3.9 14.4 4 12.3C4.1 10.3 4.9 8.3 6.3 6.9C7.7 5.4 9.6 4.5 11.6 4.2C13 3.9 14.4 3.8 15.8 3.6Z" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                  )}
-                </svg>
-              </button>
               {!isManager ? <button type="button" className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
               {!isManager ? <button type="button" className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
               <NavRailNotifications />
@@ -492,31 +659,41 @@ export function ClientsPage() {
               <div className="flex items-center gap-3">
                 <div className="flex items-baseline gap-2">
                   <h1 className={`text-[36px] font-bold leading-[100%] tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>База клиентов</h1>
-                  <span className="text-[16px] font-medium tracking-[-0.04em] text-[#B4B4B6]">
-                    {noActiveFilters ? `${totalClients} клиентов` : `${displayRows.length} из ${totalClients}`}
-                  </span>
+                  <span className={`text-[16px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#888888]"}`}>({totalClients})</span>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <input
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className={`h-12 w-[320px] rounded-[10px] border-[3px] px-3 text-[18px] font-medium tracking-[-0.04em] outline-none ${
-                      isDarkTheme
-                        ? "border-[#2B3345] bg-[#0E1420] text-[#C9D2E8] placeholder:text-[#7C879F]"
-                        : "border-[#E4E5E7] bg-white text-[#111826] placeholder:text-[#B5B5B5]"
-                    }`}
-                    placeholder="Найти клиента..."
-                  />
+                  <div className="relative">
+                    <input
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      placeholder="Поиск по ФИО..."
+                      aria-label="Поиск по ФИО..."
+                    />
+                    {searchQuery.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => setSearchQuery("")}
+                        aria-label="Очистить поиск"
+                        className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-[8px] text-black"
+                      >
+                        <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
+                          <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    ) : null}
+                  </div>
                   <button
                     type="button"
-                    className="h-12 rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-[#EC1C24] hover:bg-white hover:text-[#EC1C24]"
+                    onClick={openCreateClientModal}
+                    className="h-12 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
                   >
-                    Создать заявку
+                    Добавить клиента
                   </button>
                   <button
                     type="button"
                     onClick={() => exportClientsToXlsx(noActiveFilters ? rows : sortedRows)}
-                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-black hover:bg-white hover:text-black"
+                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
                   >
                     Экспорт в Excel
                   </button>
@@ -650,7 +827,6 @@ export function ClientsPage() {
                 <div className="h-full overflow-x-hidden overflow-y-hidden">
                   <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
                     <colgroup>
-                      <col className="w-[5%]" />
                       <col className="w-[10%]" />
                       <col className="w-[20%]" />
                       <col className="w-[14%]" />
@@ -661,21 +837,7 @@ export function ClientsPage() {
                     </colgroup>
                     <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
                       <tr>
-                        <th className="rounded-l-[5px] px-4 py-2.5 align-middle font-medium">
-                          <span
-                            className="inline-flex cursor-pointer select-none items-center"
-                            role="checkbox"
-                            aria-checked={allPageRowsSelected}
-                            aria-label="Выбрать все строки на странице"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              toggleSelectAllOnPage();
-                            }}
-                          >
-                            <ClientsStyleCheckboxBox checked={allPageRowsSelected} dark={isDarkTheme} />
-                          </span>
-                        </th>
-                        <th className="px-4 py-2.5 align-middle font-medium">
+                        <th className="rounded-l-[5px] pl-8 pr-4 py-2.5 align-middle font-medium">
                           <span className="inline-flex items-center gap-2 font-medium">
                             ID
                             <button type="button" onClick={() => toggleSort("id")} className="cursor-pointer">
@@ -728,42 +890,22 @@ export function ClientsPage() {
                     </thead>
                     <tbody>
                       {pagedRows.map((row, index) => {
-                        const isSelected = selectedRowIds.has(row.id);
                         const borderCls = isDarkTheme ? "border-[#1A2130]" : "border-[#EEEDF0]";
-                        let bgCls: string;
-                        if (isSelected) {
-                          bgCls = "bg-[#FCE6E8]";
-                        } else if (isDarkTheme) {
-                          bgCls = index % 2 === 1 ? "bg-[#141C29]" : "bg-[#0F1622]";
-                        } else {
-                          bgCls = index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white";
-                        }
-                        const hoverCls = isSelected ? "" : "hover:bg-[rgba(224,9,25,0.10)]";
+                        const bgCls = isDarkTheme ? (index % 2 === 1 ? "bg-[#141C29]" : "bg-[#0F1622]") : index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white";
+                        const hoverCls = "hover:bg-[rgba(224,9,25,0.10)]";
                         return (
-                          <tr key={row.id} className={`border-[5px] transition ${borderCls} ${bgCls} ${hoverCls}`}>
-                            <td className="px-4 py-3 align-middle" onClick={(e) => e.stopPropagation()}>
-                              <span
-                                className="inline-flex cursor-pointer select-none items-center"
-                                role="checkbox"
-                                aria-checked={isSelected}
-                                aria-label={`Выбрать клиента ${row.id}`}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  toggleRowSelection(row.id);
-                                }}
-                              >
-                                <ClientsStyleCheckboxBox checked={isSelected} dark={isDarkTheme} />
-                              </span>
-                            </td>
+                          <tr
+                            key={row.id}
+                            className={`cursor-pointer border-[5px] transition ${borderCls} ${bgCls} ${hoverCls}`}
+                            onClick={() => navigate(`/clients/${row.id}`)}
+                          >
                             <td
-                              className={`cursor-pointer whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
-                              onClick={() => navigate(`/clients/${row.id}`)}
+                              className={`whitespace-nowrap pl-8 pr-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
                             >
                               {row.id}
                             </td>
                             <td
-                              className={`cursor-pointer whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
-                              onClick={() => navigate(`/clients/${row.id}`)}
+                              className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
                             >
                               {row.fullName}
                             </td>
@@ -778,6 +920,7 @@ export function ClientsPage() {
                                 className={`cursor-pointer rounded-md px-1.5 py-0.5 text-[16px] font-bold leading-none tracking-[-0.04em] text-[#A0A0A0] transition-colors hover:text-[#EC1C24] ${
                                   isDarkTheme ? "hover:bg-white/5" : "hover:bg-black/[0.04]"
                                 }`}
+                                onClick={() => setClientActionsModal(row)}
                               >
                                 ...
                               </button>
@@ -794,12 +937,9 @@ export function ClientsPage() {
               </div>
 
               <div className="relative flex items-center justify-between">
-                <button
-                  type="button"
-                  className={`rounded-[8px] px-2 py-1 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
-                >
-                  {selectedRowIds.size} / клиентов
-                </button>
+                <div className={`rounded-[8px] px-2 py-1 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}>
+                  {sortedRows.length} клиентов
+                </div>
                 <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
                   <div className="pointer-events-auto flex items-center gap-2">
                     <button
@@ -855,6 +995,191 @@ export function ClientsPage() {
             </section>
           </main>
         </div>
+        {clientActionsModal && typeof document !== "undefined"
+          ? createPortal(
+              <div
+                className="fixed inset-0 z-[260] flex items-center justify-center bg-black/45 p-4"
+                role="presentation"
+                onClick={() => setClientActionsModal(null)}
+              >
+                <div
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="client-actions-title"
+                  className={`w-full max-w-[360px] overflow-hidden rounded-[14px] border shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)] ${
+                    isDarkTheme ? "border-[#2B3345] bg-[#131925]" : "border-[#E4E5E7] bg-white"
+                  }`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className={`border-b p-5 ${isDarkTheme ? "border-[#2B3345]" : "border-[#EEEDF0]"}`}>
+                    <h2 id="client-actions-title" className={`text-[18px] font-semibold tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>
+                      Действия с клиентом
+                    </h2>
+                    <p className={`mt-1 truncate text-[14px] font-medium tracking-[-0.04em] ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#7D7D7D]"}`}>
+                      № {clientActionsModal.id} · {clientActionsModal.fullName}
+                    </p>
+                  </div>
+                  <ul className="p-0">
+                    {([
+                      { id: "open", label: "Открыть карточку клиента" },
+                      { id: "call", label: "Позвонить" },
+                      { id: "notify", label: "Отправить уведомление" },
+                      { id: "createBooking", label: "Создать запись" },
+                      { id: "createWorkOrder", label: "Создать заказ-наряд" },
+                    ] as { id: ClientActionId; label: string }[]).map((action) => (
+                      <li key={action.id}>
+                        <button
+                          type="button"
+                          className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                            isDarkTheme ? "text-[#E8EDF8] hover:bg-white/[0.06]" : "text-[#111826] hover:bg-[#F3F3F5]"
+                          }`}
+                          onClick={() => handleClientAction(action.id)}
+                        >
+                          <ClientActionIcon
+                            type={action.id}
+                            className={isDarkTheme ? "h-[20px] w-[20px] text-[#B8C4DC]" : "h-[20px] w-[20px] text-[#4B5563]"}
+                          />
+                          {action.label}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
+        {createClientModalMounted && typeof document !== "undefined"
+          ? createPortal(
+              <div
+                className={`fixed inset-0 z-[291] bg-black/35 transition-[opacity] ${createClientModalActive ? "opacity-100" : "opacity-0"}`}
+                style={{ transitionDuration: "400ms", transitionTimingFunction: "cubic-bezier(0.45, 0, 0.55, 1)" }}
+                role="presentation"
+                onClick={closeCreateClientModal}
+              >
+                <div className="ml-auto flex h-full max-h-screen justify-end" onClick={(e) => e.stopPropagation()}>
+                  <div
+                    className="relative flex h-full shrink-0"
+                    style={{
+                      transform: createClientModalActive ? "translate3d(0, 0, 0)" : "translate3d(100%, 0, 0)",
+                      transition: "transform 480ms cubic-bezier(0.45, 0, 0.55, 1)",
+                      willChange: "transform",
+                      backfaceVisibility: "hidden",
+                      WebkitBackfaceVisibility: "hidden",
+                    }}
+                    onTransitionEnd={handleCreateClientDrawerTransitionEnd}
+                  >
+                    <button
+                      type="button"
+                      onClick={closeCreateClientModal}
+                      className="absolute right-full top-8 z-10 mr-3 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#E8E8E8] bg-white text-[#111111] shadow-[0_8px_24px_-4px_rgba(0,0,0,0.18)] transition hover:bg-[#F7F7F7]"
+                      aria-label="Закрыть модалку добавления клиента"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden>
+                        <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                      </svg>
+                    </button>
+                    <aside
+                      role="dialog"
+                      aria-modal="true"
+                      aria-labelledby="create-client-title"
+                      className="flex h-full w-[min(900px,58vw)] min-w-[380px] max-w-[min(1040px,calc(100vw-48px))] flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)]"
+                    >
+                      <div className="border-b border-[#EEEDF0] px-6 py-5">
+                        <h2 id="create-client-title" className="text-[32px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">
+                          Добавить клиента
+                        </h2>
+                      </div>
+                      <div className="hide-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
+                        <label className="block">
+                          <span className="mb-2 block text-[14px] font-medium text-[#5A6472]">Тип клиента</span>
+                          <div className="relative">
+                            <select
+                              value={createClientDraft.clientType}
+                              onChange={(e) =>
+                                setCreateClientDraft((prev) => ({
+                                  ...prev,
+                                  clientType: e.target.value as ClientType,
+                                }))
+                              }
+                              className={`h-12 w-full appearance-none rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-12 text-[18px] font-medium tracking-[-0.04em] outline-none ${
+                                createClientDraft.clientType ? "text-black" : "text-[#B5B5B5]"
+                              }`}
+                            >
+                              <option value="" disabled>
+                                Выбрать тип клиента
+                              </option>
+                              <option value="person" className="text-black">
+                                Физическое лицо
+                              </option>
+                              <option value="company" className="text-black">
+                                Юридическое лицо
+                              </option>
+                              <option value="entrepreneur" className="text-black">
+                                ИП
+                              </option>
+                            </select>
+                            <svg viewBox="0 0 16 16" fill="none" className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#111111]" aria-hidden>
+                              <path d="M3 6L8 11L13 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                          </div>
+                        </label>
+
+                        {createClientDraft.clientType === "person" ? (
+                          <>
+                            <input value={createClientDraft.fullName} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, fullName: e.target.value }))} placeholder="ФИО" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={maskRuPhoneInput(createClientDraft.phone)} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, phone: national10FromPhoneInput(e.target.value) }))} placeholder="Телефон" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.email} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, email: e.target.value }))} placeholder="E-mail" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.car} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, car: e.target.value }))} placeholder="Автомобиль" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.plate} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, plate: e.target.value }))} placeholder="Гос. номер" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                          </>
+                        ) : null}
+
+                        {createClientDraft.clientType === "company" ? (
+                          <>
+                            <input value={createClientDraft.orgName} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, orgName: e.target.value }))} placeholder="Наименование организации" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.inn} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, inn: e.target.value }))} placeholder="ИНН" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={maskRuPhoneInput(createClientDraft.phone)} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, phone: national10FromPhoneInput(e.target.value) }))} placeholder="Телефон" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.email} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, email: e.target.value }))} placeholder="E-mail" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.car} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, car: e.target.value }))} placeholder="Автомобиль" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.plate} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, plate: e.target.value }))} placeholder="Гос. номер" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                          </>
+                        ) : null}
+
+                        {createClientDraft.clientType === "entrepreneur" ? (
+                          <>
+                            <input value={createClientDraft.fullName} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, fullName: e.target.value }))} placeholder="ИП ФИО" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.inn} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, inn: e.target.value }))} placeholder="ИНН" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={maskRuPhoneInput(createClientDraft.phone)} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, phone: national10FromPhoneInput(e.target.value) }))} placeholder="Телефон" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.email} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, email: e.target.value }))} placeholder="E-mail" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.car} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, car: e.target.value }))} placeholder="Автомобиль" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                            <input value={createClientDraft.plate} onChange={(e) => setCreateClientDraft((prev) => ({ ...prev, plate: e.target.value }))} placeholder="Гос. номер" className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]" />
+                          </>
+                        ) : null}
+                      </div>
+                      <div className="flex items-center justify-between border-t border-[#EEEDF0] px-6 py-4">
+                        <button
+                          type="button"
+                          onClick={closeCreateClientModal}
+                          className="h-11 cursor-pointer rounded-[10px] bg-[#ECECEF] px-4 text-[15px] font-medium text-black"
+                        >
+                          Отмена
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCreateClientSubmit}
+                          className="h-11 cursor-pointer rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium text-white"
+                        >
+                          Добавить клиента
+                        </button>
+                      </div>
+                    </aside>
+                  </div>
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
       </div>
     </div>
   );

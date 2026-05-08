@@ -1600,13 +1600,6 @@ export function SettingsPage() {
             </button>
             <button
               type="button"
-              onClick={() => navigate("/dashboard")}
-              className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-            >
-              <MarsShellSidebarIcon type="home" />
-            </button>
-            <button
-              type="button"
               onClick={() => navigate("/")}
               className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
             >
@@ -1630,36 +1623,6 @@ export function SettingsPage() {
               <MarsShellSidebarIcon type="pie" />
             </button>
             <div className="mt-auto space-y-2">
-              <button
-                type="button"
-                onClick={() => setIsDarkTheme((prev) => !prev)}
-                className={`grid h-12 w-12 place-items-center rounded-[10px] transition ${
-                  isDarkTheme ? "bg-white text-[#11131D]" : "text-[#8C93A5] hover:bg-white/10"
-                }`}
-                title="Переключить тему"
-              >
-                <svg viewBox="0 0 24 24" fill="none" className="h-[24px] w-[24px]">
-                  {isDarkTheme ? (
-                    <>
-                      <circle cx="12" cy="12" r="4.2" stroke="currentColor" strokeWidth="1.8" />
-                      <path
-                        d="M12 2.8V5.1M12 18.9V21.2M2.8 12H5.1M18.9 12H21.2M5.2 5.2L6.9 6.9M17.1 17.1L18.8 18.8M18.8 5.2L17.1 6.9M6.9 17.1L5.2 18.8"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                        strokeLinecap="round"
-                      />
-                    </>
-                  ) : (
-                    <path
-                      d="M15.8 3.6C13.8 3.9 11.9 5 10.8 6.7C9.7 8.4 9.5 10.6 10.2 12.5C10.9 14.4 12.3 15.9 14.2 16.7C16.2 17.5 18.4 17.4 20.2 16.4C19.4 18 18.1 19.4 16.5 20.3C14.8 21.2 12.9 21.5 11 21.1C9 20.7 7.2 19.6 5.9 18C4.6 16.4 3.9 14.4 4 12.3C4.1 10.3 4.9 8.3 6.3 6.9C7.7 5.4 9.6 4.5 11.6 4.2C13 3.9 14.4 3.8 15.8 3.6Z"
-                      stroke="currentColor"
-                      strokeWidth="1.8"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  )}
-                </svg>
-              </button>
               {!isManager ? (
                 <>
                   <button
