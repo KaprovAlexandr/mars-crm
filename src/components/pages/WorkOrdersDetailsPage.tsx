@@ -1,11 +1,25 @@
 import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { RequestActionIconEdit, RequestActionIconStatus } from "@/components/icons/RequestRowModalIcons";
+import { RequestActionIconEdit, RequestActionIconStatus, RequestActionIconTrash } from "@/components/icons/RequestRowModalIcons";
 import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
+import { downloadFinanceSummaryPdf } from "@/lib/finance/exportFinanceSummaryPdf";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
+import { WORK_ORDER_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
 import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
+import {
+  isWorkOrdersRemoteEnabled,
+  listWorkOrdersStorageRows,
+  updateWorkOrdersStorageRows,
+  type WorkOrderStorageRow,
+} from "@/lib/data/workOrdersDataSource";
+import {
+  isWorkOrderDetailsRemoteEnabled,
+  loadWorkOrderDetailsState,
+  saveWorkOrderDetailsState,
+  type WorkOrderDetailsStateStorage,
+} from "@/lib/data/workOrderDetailsDataSource";
 import { createPortal } from "react-dom";
-import { useEffect, useMemo, useRef, useState, type TransitionEvent } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent, type ChangeEvent, type TransitionEvent } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 const managerMetrics = [
   {
@@ -40,29 +54,6 @@ const dailyActivity = [
   { label: "Время первого ответа", value: "4 мин", note: "Среднее время реакции на лид" },
 ];
 
-const publicProfileFields = [
-  { label: "ФИО", value: "Смирнова Наталья Викторовна" },
-  { label: "Тип клиента", value: "Физ.лицо" },
-  { label: "Телефон", value: "+7 (909) 999-99-99" },
-  { label: "Email", value: "natalya@gmail.com" },
-  { label: "Адрес", value: "г. Москва, ул. Пушкина, д. 15, кв. 42" },
-  { label: "Дата последнего визита", value: "06.05.2026" },
-  { label: "Комментарий", value: "Не звонить после 19:00" },
-];
-
-const carProfileFields = [
-  { label: "Марка и модель", value: "Hyundai Solaris" },
-  { label: "Пробег", value: "87 500 км" },
-  { label: "Гос.номер", value: "M456OT799 ⛓" },
-  { label: "Тип кузова", value: "Седан" },
-  { label: "VIN", value: "KMHC81BDXKU123456 ⛓" },
-  { label: "Тип топлива", value: "Бензин" },
-  { label: "Год выпуска", value: "2019" },
-  { label: "Трансмиссия", value: "АКПП" },
-  { label: "Цвет", value: "Серебристый" },
-  { label: "Комментарий", value: "Царапина на бампере...Показать" },
-];
-
 const clientCars = [
   { name: "BMW M5 F90", orders: 8, amount: 120000, main: true },
   { name: "Lada Priora", orders: 4, amount: 28000, main: false },
@@ -72,7 +63,7 @@ const clientCars = [
   { name: "VW Polo", orders: 2, amount: 18700, main: false },
 ];
 
-const carDocumentItems = [
+const initialCarDocumentNames = [
   "Акт приёма-передачи автомобиля.pdf",
   "Заказ-наряд.pdf",
   "Диагностический протокол.docx",
@@ -82,6 +73,8 @@ const carDocumentItems = [
   "Кассовый чек.pdf",
   "Гарантийный талон.pdf",
 ];
+
+type CarDocumentRow = { id: string; name: string; blobUrl?: string };
 
 const initialCarPhotoItems = [
   "/bmwm5_1.png",
@@ -110,29 +103,101 @@ const clientActivityItems = [
 
 type WorkStatusKind = "progress" | "wait" | "closed" | "new";
 type WorkRow = [string, string, string, WorkStatusKind, string, string?];
+/** [название, кол-во, цена, дата добавления, id] */
+type PartRow = [string, string, string, string, string];
 
-/** [название, статус, сумма, статусKind: "progress" | "wait" | "closed" | "new", дата добавления] */
+function getCatalogWorkPrice(title: string): number {
+  return 1500 + title.length * 120;
+}
+
+function formatWorkPrice(price: number): string {
+  return `${price.toLocaleString("ru-RU")} ₽`;
+}
+
+function parsePartQuantityInput(raw: string): number | null {
+  const t = raw.trim().replace(/\s/g, "").replace(",", ".");
+  if (t === "") return null;
+  const n = Number(t);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function formatPartQuantityCell(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  let s = n.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 10 });
+  if (s.includes(".")) {
+    s = s.replace(/\.?0+$/, "");
+  }
+  return s;
+}
+
+function formatPartLineTotalRub(unitPrice: number, quantity: number): string {
+  const total = Math.round(unitPrice * quantity * 100) / 100;
+  const hasFraction = !Number.isInteger(total);
+  return `${total.toLocaleString("ru-RU", { minimumFractionDigits: hasFraction ? 2 : 0, maximumFractionDigits: 2 })} ₽`;
+}
+
+function seededRandom(seed: number): () => number {
+  let s = seed % 2147483647;
+  if (s <= 0) s += 2147483646;
+  return () => {
+    s = (s * 16807) % 2147483647;
+    return (s - 1) / 2147483646;
+  };
+}
+
+function makeOrderSeed(orderId: string): number {
+  let hash = 0;
+  for (let i = 0; i < orderId.length; i += 1) {
+    hash = (hash * 31 + orderId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash) + 1;
+}
+
 const workOrderCurrentWorks: WorkRow[] = [
-  ["Диагностика ходовой части", "В работе", "4 200 ₽", "progress", "07.05.2026"],
-  ["Замена тормозных колодок (перед)", "В работе", "8 900 ₽", "progress", "07.05.2026"],
-  ["Согласование доп. работ по АКПП", "Ожидает", "0 ₽", "wait", "06.05.2026"],
-  ["Проверка аккумулятора и генератора", "В работе", "1 800 ₽", "progress", "06.05.2026"],
-  ["Замена ламп ближнего света", "Ожидает", "1 200 ₽", "wait", "05.05.2026"],
-  ["Чистка дроссельной заслонки", "В работе", "3 400 ₽", "progress", "05.05.2026"],
-  ["Диагностика системы охлаждения", "В работе", "2 600 ₽", "progress", "04.05.2026"],
-  ["Замена ремня навесного оборудования", "Ожидает", "2 900 ₽", "wait", "04.05.2026"],
-  ["Проверка тормозных дисков", "В работе", "1 700 ₽", "progress", "03.05.2026"],
-  ["Замена свечей зажигания", "В работе", "3 100 ₽", "progress", "03.05.2026"],
-  ["Промывка форсунок", "Ожидает", "4 500 ₽", "wait", "02.05.2026"],
-  ["Регулировка фар", "В работе", "1 300 ₽", "progress", "02.05.2026"],
-  ["Диагностика подвески (повторная)", "В работе", "2 200 ₽", "progress", "01.05.2026"],
+  ["Диагностика ходовой части", "В работе", formatWorkPrice(getCatalogWorkPrice("Диагностика ходовой части")), "progress", "07.05.2026"],
+  ["Замена тормозных колодок (перед)", "В работе", formatWorkPrice(getCatalogWorkPrice("Замена тормозных колодок (перед)")), "progress", "07.05.2026"],
+  ["Диагностика АКПП", "Ожидает", formatWorkPrice(getCatalogWorkPrice("Диагностика АКПП")), "wait", "06.05.2026"],
+  ["Проверка аккумулятора", "В работе", formatWorkPrice(getCatalogWorkPrice("Проверка аккумулятора")), "progress", "06.05.2026"],
+  ["Замена ламп освещения", "Ожидает", formatWorkPrice(getCatalogWorkPrice("Замена ламп освещения")), "wait", "05.05.2026"],
+  ["Чистка дроссельной заслонки", "В работе", formatWorkPrice(getCatalogWorkPrice("Чистка дроссельной заслонки")), "progress", "05.05.2026"],
+  ["Диагностика системы охлаждения", "В работе", formatWorkPrice(getCatalogWorkPrice("Диагностика системы охлаждения")), "progress", "04.05.2026"],
+  ["Замена ремня навесного оборудования", "Ожидает", formatWorkPrice(getCatalogWorkPrice("Замена ремня навесного оборудования")), "wait", "04.05.2026"],
+  ["Проверка тормозных дисков", "В работе", formatWorkPrice(getCatalogWorkPrice("Проверка тормозных дисков")), "progress", "03.05.2026"],
+  ["Замена свечей зажигания", "В работе", formatWorkPrice(getCatalogWorkPrice("Замена свечей зажигания")), "progress", "03.05.2026"],
+  ["Промывка форсунок", "Ожидает", formatWorkPrice(getCatalogWorkPrice("Промывка форсунок")), "wait", "02.05.2026"],
+  ["Регулировка фар", "В работе", formatWorkPrice(getCatalogWorkPrice("Регулировка фар")), "progress", "02.05.2026"],
+  ["Диагностика подвески", "В работе", formatWorkPrice(getCatalogWorkPrice("Диагностика подвески")), "progress", "01.05.2026"],
 ];
 
 const workOrderCompletedWorks: WorkRow[] = [
-  ["ТО-60 000 км", "Закрыт", "14 100 ₽", "closed", "07.05.2026"],
-  ["Замена масла ДВС и фильтра", "Закрыт", "3 500 ₽", "closed", "05.05.2026"],
-  ["Развал-схождение", "Закрыт", "2 800 ₽", "closed", "03.05.2026"],
+  ["ТО-60 000 км", "Готово", formatWorkPrice(getCatalogWorkPrice("ТО-60 000 км")), "closed", "07.05.2026"],
+  ["Замена масла ДВС и фильтра", "Готово", formatWorkPrice(getCatalogWorkPrice("Замена масла ДВС и фильтра")), "closed", "05.05.2026"],
+  ["Развал-схождение", "Готово", formatWorkPrice(getCatalogWorkPrice("Развал-схождение")), "closed", "03.05.2026"],
 ];
+const partsCurrentRows: PartRow[] = (
+  [
+    ["Масляный фильтр", "2", "690 ₽", "07.05.2026"],
+    ["Воздушный фильтр", "1", "780 ₽", "07.05.2026"],
+    ["Свеча зажигания", "4", "540 ₽", "06.05.2026"],
+    ["Амортизатор передний", "2", "6 200 ₽", "06.05.2026"],
+    ["Тормозной диск", "2", "3 400 ₽", "05.05.2026"],
+    ["Рулевая рейка", "1", "21 400 ₽", "05.05.2026"],
+    ["Сцепление комплект", "1", "12 400 ₽", "04.05.2026"],
+    ["Лампа ближнего света", "2", "450 ₽", "04.05.2026"],
+    ["Фара передняя", "1", "19 800 ₽", "03.05.2026"],
+    ["Компрессор кондиционера", "1", "26 800 ₽", "03.05.2026"],
+    ["Шина летняя", "4", "7 300 ₽", "02.05.2026"],
+    ["Антифриз", "3", "1 300 ₽", "02.05.2026"],
+    ["Масло АКПП", "5", "1 900 ₽", "01.05.2026"],
+  ] as const
+).map((row, index) => {
+  const [title, qtyStr, unitPriceStr, date] = row;
+  const qty = parsePartQuantityInput(qtyStr) ?? 1;
+  const unitRub = parseRubAmount(unitPriceStr);
+  const lineStr = formatPartLineTotalRub(unitRub, qty);
+  return [title, qtyStr, lineStr, date, `parts-current-base-${index}`] as PartRow;
+});
 const workCatalogSections = [
   {
     label: "Все работы",
@@ -234,22 +299,155 @@ const workCatalogSections = [
     ],
   },
 ] as const;
+
+function findWorkCatalogCategoryForTitle(title: string): string {
+  for (const section of workCatalogSections) {
+    if (section.label === "Все работы") continue;
+    if ((section.items as readonly string[]).includes(title)) return section.label;
+  }
+  return "Все работы";
+}
+
+function catalogWorkItemFromTitle(title: string): { title: string; price: number; durationMin: number } {
+  const price = getCatalogWorkPrice(title);
+  return { title, price, durationMin: 20 + (title.length % 9) * 10 };
+}
+
+const partsCatalogSections: Array<{ label: string; items: Array<{ title: string; price: number }> }> = [
+  {
+    label: "Все запчасти",
+    items: [],
+  },
+  {
+    label: "Двигатель",
+    items: [
+      { title: "Масляный фильтр", price: 690 }, { title: "Воздушный фильтр", price: 780 }, { title: "Салонный фильтр", price: 820 }, { title: "Топливный фильтр", price: 1150 },
+      { title: "Свеча зажигания", price: 540 }, { title: "Катушка зажигания", price: 2850 }, { title: "Ремень ГРМ", price: 3650 }, { title: "Цепь ГРМ", price: 7900 },
+      { title: "Натяжитель цепи", price: 3350 }, { title: "Ролик натяжной", price: 2100 }, { title: "Помпа", price: 4200 }, { title: "Прокладка ГБЦ", price: 2650 },
+      { title: "Прокладка клапанной крышки", price: 1450 }, { title: "Сальник коленвала", price: 980 }, { title: "Сальник распредвала", price: 940 }, { title: "Поршень", price: 3900 },
+      { title: "Кольца поршневые", price: 2250 }, { title: "Шатун", price: 4400 }, { title: "Вкладыши", price: 1980 }, { title: "Клапан впускной", price: 1350 },
+      { title: "Клапан выпускной", price: 1390 }, { title: "Гидрокомпенсатор", price: 1120 }, { title: "Турбина", price: 32800 }, { title: "Интеркулер", price: 9800 },
+      { title: "Радиатор двигателя", price: 7400 }, { title: "Вентилятор охлаждения", price: 5200 }, { title: "Термостат", price: 1900 }, { title: "Датчик температуры", price: 1250 },
+      { title: "ДМРВ", price: 4750 }, { title: "Лямбда-зонд", price: 5600 }, { title: "Дроссельная заслонка", price: 8900 }, { title: "Форсунка", price: 3850 },
+      { title: "ТНВД", price: 24800 }, { title: "Стартер", price: 7900 }, { title: "Генератор", price: 9900 }, { title: "Аккумулятор", price: 8600 },
+    ],
+  },
+  {
+    label: "Подвеска",
+    items: [
+      { title: "Амортизатор передний", price: 6200 }, { title: "Амортизатор задний", price: 5200 }, { title: "Стойка стабилизатора", price: 1350 }, { title: "Втулка стабилизатора", price: 540 },
+      { title: "Шаровая опора", price: 1650 }, { title: "Рычаг подвески", price: 6900 }, { title: "Сайлентблок", price: 790 }, { title: "Пружина подвески", price: 3150 },
+      { title: "Опора амортизатора", price: 1900 }, { title: "Подшипник опоры", price: 1250 }, { title: "Ступица", price: 5400 }, { title: "Подшипник ступицы", price: 2450 },
+      { title: "Поворотный кулак", price: 8100 }, { title: "ШРУС внутренний", price: 3600 }, { title: "ШРУС наружный", price: 3300 }, { title: "Привод в сборе", price: 12400 },
+    ],
+  },
+  {
+    label: "Тормозная система",
+    items: [
+      { title: "Тормозные колодки передние", price: 2600 }, { title: "Тормозные колодки задние", price: 2300 }, { title: "Тормозной диск", price: 3400 }, { title: "Тормозной барабан", price: 2950 },
+      { title: "Суппорт", price: 6800 }, { title: "Ремкомплект суппорта", price: 1250 }, { title: "Тормозной цилиндр", price: 1750 }, { title: "Главный тормозной цилиндр", price: 5900 },
+      { title: "Вакуумный усилитель", price: 7200 }, { title: "Тормозной шланг", price: 650 }, { title: "Тормозная трубка", price: 520 }, { title: "Датчик ABS", price: 2300 },
+      { title: "Тормозная жидкость", price: 980 },
+    ],
+  },
+  {
+    label: "Рулевое управление",
+    items: [
+      { title: "Рулевая рейка", price: 21400 }, { title: "Тяга рулевая", price: 1450 }, { title: "Наконечник рулевой", price: 1200 }, { title: "Насос ГУР", price: 11800 },
+      { title: "Жидкость ГУР", price: 880 }, { title: "Электроусилитель руля", price: 26800 }, { title: "Кардан рулевой", price: 4200 },
+    ],
+  },
+  {
+    label: "Трансмиссия",
+    items: [
+      { title: "Сцепление комплект", price: 12400 }, { title: "Корзина сцепления", price: 7100 }, { title: "Выжимной подшипник", price: 2300 }, { title: "Маховик", price: 16800 },
+      { title: "МКПП", price: 64800 }, { title: "АКПП", price: 114000 }, { title: "Масло АКПП", price: 1900 }, { title: "Масло МКПП", price: 1650 },
+      { title: "Прокладка поддона АКПП", price: 1400 }, { title: "Сальник привода", price: 920 }, { title: "Дифференциал", price: 38500 },
+    ],
+  },
+  {
+    label: "Электрика",
+    items: [
+      { title: "Лампа ближнего света", price: 450 }, { title: "Лампа дальнего света", price: 470 }, { title: "LED лампа", price: 1650 }, { title: "Предохранитель", price: 120 },
+      { title: "Реле", price: 350 }, { title: "Блок управления", price: 27800 }, { title: "Проводка", price: 5400 }, { title: "Датчик ABS", price: 2300 },
+      { title: "Датчик коленвала", price: 1950 }, { title: "Датчик распредвала", price: 1890 }, { title: "Камера заднего вида", price: 3200 }, { title: "Парктроник", price: 1450 },
+    ],
+  },
+  {
+    label: "Кузов",
+    items: [
+      { title: "Бампер передний", price: 15400 }, { title: "Бампер задний", price: 14800 }, { title: "Крыло переднее", price: 9200 }, { title: "Крыло заднее", price: 13200 },
+      { title: "Капот", price: 18600 }, { title: "Дверь", price: 22400 }, { title: "Крышка багажника", price: 17100 }, { title: "Решетка радиатора", price: 5400 },
+      { title: "Фара передняя", price: 19800 }, { title: "Фонарь задний", price: 8600 }, { title: "ПТФ", price: 3100 }, { title: "Зеркало боковое", price: 7900 },
+      { title: "Лобовое стекло", price: 17300 }, { title: "Стеклоподъемник", price: 4200 }, { title: "Замок двери", price: 2400 },
+    ],
+  },
+  {
+    label: "Система кондиционирования",
+    items: [
+      { title: "Компрессор кондиционера", price: 26800 }, { title: "Радиатор кондиционера", price: 11200 }, { title: "Испаритель", price: 9300 },
+      { title: "Осушитель кондиционера", price: 2500 }, { title: "Фреон", price: 1800 }, { title: "Датчик давления кондиционера", price: 2200 },
+    ],
+  },
+  {
+    label: "Шиномонтаж",
+    items: [
+      { title: "Шина летняя", price: 7300 }, { title: "Шина зимняя", price: 8900 }, { title: "Диск литой", price: 12400 }, { title: "Диск штампованный", price: 4700 },
+      { title: "Ниппель", price: 110 }, { title: "Грузик балансировочный", price: 90 }, { title: "Ремкомплект шины", price: 650 },
+    ],
+  },
+  {
+    label: "Технические жидкости",
+    items: [
+      { title: "Масло моторное 5W-30", price: 2400 }, { title: "Масло моторное 5W-40", price: 2500 }, { title: "Антифриз", price: 1300 },
+      { title: "Тормозная жидкость DOT-4", price: 990 }, { title: "Жидкость ГУР", price: 880 }, { title: "Омывающая жидкость", price: 350 },
+      { title: "Масло АКПП", price: 1900 }, { title: "Масло МКПП", price: 1650 },
+    ],
+  },
+];
+
+function findPartsCatalogCategoryForTitle(title: string): string {
+  for (const section of partsCatalogSections) {
+    if (section.label === "Все запчасти") continue;
+    if (section.items.some((it) => it.title === title)) return section.label;
+  }
+  return "Все запчасти";
+}
+
+function findPartsCatalogItemByTitle(title: string): { title: string; price: number } | null {
+  for (const section of partsCatalogSections) {
+    if (section.label === "Все запчасти") continue;
+    const hit = section.items.find((it) => it.title === title);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function catalogPartItemFromTitle(title: string): { title: string; price: number; durationMin: number } {
+  const found = findPartsCatalogItemByTitle(title);
+  if (found) return { title: found.title, price: found.price, durationMin: 0 };
+  return { title, price: 1500, durationMin: 0 };
+}
+
 const WORK_STATUS_OPTIONS: Array<{ label: string; kind: WorkStatusKind }> = [
-  { label: "Новая", kind: "new" },
+  { label: "Новый", kind: "new" },
   { label: "В работе", kind: "progress" },
   { label: "Ожидает", kind: "wait" },
+  { label: "Готово", kind: "closed" },
   { label: "Закрыт", kind: "closed" },
 ];
 const workStatusColorMap: Record<string, string> = {
-  Новая: "#ACACAC",
+  Новый: "#ACACAC",
   "В работе": "#2E78C9",
   Ожидает: "#F39D00",
-  Закрыт: "#00B515",
+  "Отказ клиента": "#EC1C24",
+  Готово: "#00B515",
+  Закрыт: "#111111",
 };
 
 const MASTER_PROFILE = { fullName: "Журавлёв Михаил Дмитриевич" };
-const CURRENT_WORK_ORDER_ID = "593423";
-const MASTER_WORK_ORDERS_PAGE_NAME = "Журавлёв М.";
+const FALLBACK_WORK_ORDER_ID = "593423";
+const DEFAULT_MASTER_NAME = "Журавлёв М.";
 const workOrderMasterOverrideStorageKey = "workOrderMasterOverrides";
 const masterFullNameByName: Record<string, string> = {
   "Алексеев Д.": "Алексеев Дмитрий Андреевич",
@@ -292,25 +490,162 @@ const workOrdersSourceRows = [
   { id: "593423", car: "Kia Rio", master: "Семёнова Е.", status: "Новый", dueDate: "04.04.2026" },
   { id: "839022", car: "Lada Priora", master: "Кириллов О.", status: "Ожидание запчастей", dueDate: "06.04.2026" },
   { id: "847952", car: "Toyota Camry", master: "Гусева М.", status: "В работе", dueDate: "08.04.2026" },
-  { id: "495783", car: "Skoda Octavia", master: "Тимофеев А.", status: "Закрыт", dueDate: "10.04.2026" },
+  { id: "495783", car: "Skoda Octavia", master: "Тимофеев А.", status: "Готово", dueDate: "10.04.2026" },
   { id: "987384", car: "Hyundai Solaris", master: "Романова Л.", status: "Новый", dueDate: "12.04.2026" },
   { id: "284750", car: "Renault Duster", master: "Журавлёв М.", status: "В работе", dueDate: "14.04.2026" },
-  { id: "847597", car: "VW Polo", master: "Кузнецов Е.", status: "Закрыт", dueDate: "16.04.2026" },
+  { id: "847597", car: "VW Polo", master: "Кузнецов Е.", status: "Готово", dueDate: "16.04.2026" },
   { id: "658472", car: "MAN TGS", master: "Алексеев Д.", status: "В работе", dueDate: "18.04.2026" },
   { id: "309845", car: "Mercedes Actros", master: "Семёнова Е.", status: "Готово", dueDate: "20.04.2026" },
   { id: "208476", car: "Mazda 6", master: "Захарова И.", status: "Ожидание запчастей", dueDate: "22.04.2026" },
-  { id: "989923", car: "Ford Transit", master: "Тимофеев А.", status: "Закрыт", dueDate: "24.04.2026" },
+  { id: "989923", car: "Ford Transit", master: "Тимофеев А.", status: "Готово", dueDate: "24.04.2026" },
   { id: "923117", car: "Nissan X-Trail", master: "Алексеев Д.", status: "В работе", dueDate: "26.04.2026" },
-  { id: "731550", car: "Scania R450", master: "Журавлёв М.", status: "Отказ клиента", dueDate: "28.04.2026" },
-  { id: "615004", car: "Kia Sportage", master: "Гусева М.", status: "Закрыт", dueDate: "30.04.2026" },
+  { id: "731550", car: "Scania R450", master: "Журавлёв М.", status: "Готово", dueDate: "28.04.2026" },
+  { id: "615004", car: "Kia Sportage", master: "Гусева М.", status: "Готово", dueDate: "30.04.2026" },
   { id: "771208", car: "Audi A6", master: "Кузнецов Е.", status: "В работе", dueDate: "02.05.2026" },
   { id: "842661", car: "Skoda Kodiaq", master: "Семёнова Е.", status: "Ожидание запчастей", dueDate: "03.05.2026" },
   { id: "904552", car: "DAF XF", master: "Тимофеев А.", status: "Готово", dueDate: "04.05.2026" },
   { id: "956740", car: "BMW X5", master: "Алексеев Д.", status: "В работе", dueDate: "05.05.2026" },
-  { id: "118390", car: "Toyota RAV4", master: "Гусева М.", status: "Закрыт", dueDate: "06.05.2026" },
+  { id: "118390", car: "Toyota RAV4", master: "Гусева М.", status: "Готово", dueDate: "06.05.2026" },
   { id: "552701", car: "BMW 320i", master: "Журавлёв М.", status: "В работе", dueDate: "07.05.2026" },
-  { id: "552702", car: "Skoda Rapid", master: "Журавлёв М.", status: "Закрыт", dueDate: "05.05.2026" },
+  { id: "552702", car: "Skoda Rapid", master: "Журавлёв М.", status: "Готово", dueDate: "05.05.2026" },
 ] as const;
+
+type WorkOrderMeta = {
+  id: string;
+  client: string;
+  car: string;
+  plate: string;
+  master: string;
+  status: string;
+  dueDate: string;
+  amount: string;
+};
+
+function mapWorkOrderStorageToMeta(row: WorkOrderStorageRow): WorkOrderMeta {
+  return {
+    id: row.id,
+    client: row.client,
+    car: row.car,
+    plate: row.plate,
+    master: row.master,
+    status: row.status ?? "Новый",
+    dueDate: row.due_date,
+    amount: row.amount,
+  };
+}
+
+function fallbackWorkOrderMeta(id: string): WorkOrderMeta {
+  const row = workOrdersSourceRows.find((item) => item.id === id);
+  if (!row) {
+    return {
+      id,
+      client: "",
+      car: "Автомобиль не указан",
+      plate: "—",
+      master: DEFAULT_MASTER_NAME,
+      status: "Новый",
+      dueDate: "—",
+      amount: "0 ₽",
+    };
+  }
+  return {
+    id: row.id,
+    client: "",
+    car: row.car,
+    plate: "—",
+    master: row.master,
+    status: row.status,
+    dueDate: row.dueDate,
+    amount: "0 ₽",
+  };
+}
+
+function mapSourceRowToMeta(row: (typeof workOrdersSourceRows)[number]): WorkOrderMeta {
+  return {
+    id: row.id,
+    client: "",
+    car: row.car,
+    plate: "—",
+    master: row.master,
+    status: row.status,
+    dueDate: row.dueDate,
+    amount: "0 ₽",
+  };
+}
+
+function buildClientFields(order: WorkOrderMeta) {
+  return [
+    { label: "ФИО", value: order.client || "" },
+    { label: "Тип клиента", value: "Физ.лицо" },
+    { label: "Телефон", value: "+7 (909) 999-99-99" },
+    { label: "Email", value: "natalya@gmail.com" },
+    { label: "Адрес", value: "г. Москва, ул. Пушкина, д. 15, кв. 42" },
+    { label: "Дата последнего визита", value: order.dueDate || "—" },
+    { label: "Комментарий", value: "Не звонить после 19:00" },
+  ];
+}
+
+function buildVehicleFields(order: WorkOrderMeta) {
+  return [
+    { label: "Марка и модель", value: order.car || "—" },
+    { label: "Пробег", value: "87 500 км" },
+    { label: "Гос.номер", value: `${order.plate || "—"} ⛓` },
+    { label: "Тип кузова", value: "Седан" },
+    { label: "VIN", value: "KMHC81BDXKU123456 ⛓" },
+    { label: "Тип топлива", value: "Бензин" },
+    { label: "Год выпуска", value: "2019" },
+    { label: "Трансмиссия", value: "АКПП" },
+    { label: "Цвет", value: "Серебристый" },
+    { label: "Комментарий", value: "Царапина на бампере...Показать" },
+  ];
+}
+
+function splitToTwoLines(value: string): { first: string; second: string } {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return { first: value.trim(), second: "" };
+  return { first: words.slice(0, -1).join(" "), second: words[words.length - 1] ?? "" };
+}
+
+function generateWorkRowsByOrderId(orderId: string): { current: WorkRow[]; completed: WorkRow[] } {
+  const rand = seededRandom(makeOrderSeed(orderId));
+  const allCatalogTitles = workCatalogSections
+    .filter((section) => section.label !== "Все работы")
+    .flatMap((section) => section.items);
+  const uniqueTitles = Array.from(new Set(allCatalogTitles));
+  const shuffled = [...uniqueTitles].sort(() => rand() - 0.5);
+  const currentCount = 8 + Math.floor(rand() * 6);
+  const completedCount = 2 + Math.floor(rand() * 4);
+  const currentTitles = shuffled.slice(0, currentCount);
+  const completedTitles = shuffled.slice(currentCount, currentCount + completedCount);
+  const dayBase = 1 + Math.floor(rand() * 20);
+  const toDate = (offset: number) => `${String(Math.max(1, dayBase - offset)).padStart(2, "0")}.05.2026`;
+
+  const current = currentTitles.map((title, index) => {
+    const kind: WorkStatusKind = rand() > 0.28 ? "progress" : "wait";
+    const statusLabel = kind === "progress" ? "В работе" : "Ожидает";
+    return [
+      title,
+      statusLabel,
+      formatWorkPrice(getCatalogWorkPrice(title)),
+      kind,
+      toDate(index % 10),
+      `current-${orderId}-${index}`,
+    ];
+  });
+
+  const completed = completedTitles.map((title, index) => {
+    return [
+      title,
+      "Готово",
+      formatWorkPrice(getCatalogWorkPrice(title)),
+      "closed",
+      toDate(2 + (index % 10)),
+      `completed-${orderId}-${index}`,
+    ];
+  });
+
+  return { current, completed };
+}
 
 function downloadMockDocument(fileName: string) {
   const content = [
@@ -330,6 +665,19 @@ function downloadMockDocument(fileName: string) {
   URL.revokeObjectURL(url);
 }
 
+function downloadCarDocument(doc: CarDocumentRow) {
+  if (doc.blobUrl) {
+    const link = document.createElement("a");
+    link.href = doc.blobUrl;
+    link.download = doc.name;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    return;
+  }
+  downloadMockDocument(doc.name);
+}
+
 function parseRubAmount(value: string): number {
   const digits = value.replace(/[^\d]/g, "");
   return digits ? Number(digits) : 0;
@@ -344,14 +692,6 @@ function parseRuDate(value: string): Date | null {
   const date = new Date(year, month, day);
   if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) return null;
   return date;
-}
-
-function isDelayedWorkOrderByPageRules(status: string, dueDate: string, now: Date): boolean {
-  if (status !== "В работе" && status !== "Новый") return false;
-  const acceptedAt = parseRuDate(dueDate);
-  if (!acceptedAt) return false;
-  const delayedFromMs = acceptedAt.getTime() + 24 * 60 * 60 * 1000;
-  return now.getTime() >= delayedFromMs;
 }
 
 function extractWorkOrderIdFromCardText(text: string): string | null {
@@ -371,6 +711,16 @@ function normalizeSearchText(value: string): string {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function filterCatalogByQuery<T extends { title: string }>(items: T[], rawQuery: string): T[] {
+  const query = normalizeSearchText(rawQuery);
+  if (!query) return items;
+  const exactMatches = items.filter((item) => normalizeSearchText(item.title) === query);
+  if (exactMatches.length > 0) return exactMatches;
+  const startsWithMatches = items.filter((item) => normalizeSearchText(item.title).startsWith(query));
+  if (startsWithMatches.length > 0) return startsWithMatches;
+  return items.filter((item) => normalizeSearchText(item.title).includes(query));
 }
 
 function ClientsStyleCheckboxBox({ checked }: { checked: boolean }) {
@@ -417,63 +767,167 @@ function MasterActionIcon({ type, className }: { type: "profile" | "schedule" | 
   );
 }
 
-function WorkActionIcon({ type, className }: { type: "parts" | "status" | "edit"; className?: string }) {
+function WorkActionIcon({
+  type,
+  className,
+}: {
+  type: "status" | "edit" | "archive" | "restore" | "download";
+  className?: string;
+}) {
   const cls = className ?? "";
   if (type === "status") return <RequestActionIconStatus className={cls} />;
   if (type === "edit") return <RequestActionIconEdit className={cls} />;
+  if (type === "archive") return <RequestActionIconTrash className={cls} />;
+  if (type === "download") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className={`h-[22px] w-[22px] shrink-0 ${cls}`} aria-hidden>
+        <path
+          d="M12 4v11m0 0 3.5-3.5M12 15 8.5 11.5M5 20h14"
+          stroke="currentColor"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
   return (
-    <svg viewBox="0 0 27 27" fill="none" className={`h-[22px] w-[22px] shrink-0 ${cls}`} aria-hidden>
-      <path d="M12.1122 12.1112L5.16797 5.16846" stroke="currentColor" strokeWidth="2" />
-      <path d="M3.77929 7.25146L7.25138 3.78009L3.08487 1.69727L1.69603 3.08582L3.77929 7.25146ZM24.5771 9.29957C25.2439 8.63351 25.7026 7.78799 25.8974 6.86596C26.0922 5.94394 26.0147 4.98517 25.6743 4.1064L23.6994 6.08092H20.9217V3.30382L22.8966 1.32931C22.0176 0.988198 21.0583 0.910051 20.1357 1.10439C19.213 1.29872 18.3668 1.75715 17.7002 2.42382C17.0335 3.09049 16.5752 3.93662 16.381 4.85912C16.1868 5.78162 16.2652 6.74067 16.6066 7.61943L7.62081 16.6047C6.74187 16.2634 5.78262 16.1851 4.85992 16.3792C3.93723 16.5733 3.09092 17.0316 2.42411 17.6981C1.75731 18.3646 1.29878 19.2106 1.10441 20.1331C0.910032 21.0556 0.988196 22.0146 1.32938 22.8935L3.30291 20.9189H6.08059V23.696L4.10566 25.6705C4.98446 26.0117 5.94349 26.0899 6.86598 25.8958C7.78847 25.7017 8.63461 25.2436 9.30134 24.5773C9.96808 23.911 10.4266 23.0653 10.6212 22.1431C10.8157 21.2208 10.7379 20.262 10.3971 19.3832L19.3856 10.3965C20.2642 10.7363 21.2226 10.8135 22.1443 10.6187C23.066 10.424 23.9112 9.96569 24.5771 9.29957Z" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
-      <path d="M13.2188 16.972L21.0018 24.7534C21.1759 24.9279 21.3828 25.0663 21.6105 25.1607C21.8382 25.2551 22.0823 25.3037 22.3288 25.3037C22.5753 25.3037 22.8194 25.2551 23.0472 25.1607C23.2749 25.0663 23.4817 24.9279 23.6559 24.7534L24.7558 23.6537C24.9303 23.4796 25.0687 23.2728 25.1632 23.0451C25.2576 22.8174 25.3062 22.5734 25.3062 22.3269C25.3062 22.0805 25.2576 21.8364 25.1632 21.6088C25.0687 21.3811 24.9303 21.1743 24.7558 21.0002L16.9728 13.2188" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+    <svg viewBox="0 0 24 24" fill="none" className={`h-[22px] w-[22px] shrink-0 ${cls}`} aria-hidden>
+      <path
+        d="M9 14 4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3"
+        stroke="currentColor"
+        strokeWidth="1.9"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function MoreDotsCircleMenuIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className={className ?? "h-[18px] w-[18px] shrink-0"}
+      aria-hidden
+    >
+      <circle cx="4" cy="12" r="2.5" />
+      <circle cx="12" cy="12" r="2.5" />
+      <circle cx="20" cy="12" r="2.5" />
     </svg>
   );
 }
 
 export function WorkOrdersDetailsPage() {
   const navigate = useNavigate();
+  const params = useParams<{ id: string }>();
+  const currentWorkOrderId = params.id ?? FALLBACK_WORK_ORDER_ID;
+  const [orderMeta, setOrderMeta] = useState<WorkOrderMeta>(() => fallbackWorkOrderMeta(currentWorkOrderId));
+  const [orderMetaHydrated, setOrderMetaHydrated] = useState(false);
+  const [allWorkOrdersMeta, setAllWorkOrdersMeta] = useState<WorkOrderMeta[]>(() => workOrdersSourceRows.map(mapSourceRowToMeta));
   const isManager = CURRENT_USER_ROLE === "manager";
   const [activeTab, setActiveTab] = useState<"client" | "car">("client");
   const [displayedTab, setDisplayedTab] = useState<"client" | "car">("client");
   const [leftContentPhase, setLeftContentPhase] = useState<"idle" | "out" | "in">("idle");
   const [activeClientPanel, setActiveClientPanel] = useState<"main" | "cars">("main");
-  const [activeCarPanel, setActiveCarPanel] = useState<"orders" | "documents" | "photos" | "finance">("orders");
+  const [activeCarPanel, setActiveCarPanel] = useState<"orders" | "parts" | "documents" | "photos" | "finance">("orders");
   const [workSearchQuery, setWorkSearchQuery] = useState("");
-  const [worksScope, setWorksScope] = useState<"current" | "completed">("current");
-  const [workActionsModal, setWorkActionsModal] = useState<{ title: string; workId: string; scope: "current" | "completed"; statusLabel: string } | null>(null);
+  const [partsSearchQuery, setPartsSearchQuery] = useState("");
+  const [documentsSearchQuery, setDocumentsSearchQuery] = useState("");
+  const [worksScope, setWorksScope] = useState<"current" | "completed" | "archived">("current");
+  const [workActionsModal, setWorkActionsModal] = useState<{
+    title: string;
+    workId: string;
+    scope: "current" | "completed" | "archived" | "parts" | "partsArchived";
+    statusLabel: string;
+  } | null>(null);
   const [workStatusPicker, setWorkStatusPicker] = useState<{ title: string; workId: string; statusLabel: string } | null>(null);
   const [masterActionsModalOpen, setMasterActionsModalOpen] = useState(false);
   const [switchMasterModalOpen, setSwitchMasterModalOpen] = useState(false);
   const [switchMasterSelection, setSwitchMasterSelection] = useState<string | null>(null);
-  const [assignedMasterName, setAssignedMasterName] = useState<string>(MASTER_WORK_ORDERS_PAGE_NAME);
+  const [assignedMasterName, setAssignedMasterName] = useState<string>(() => fallbackWorkOrderMeta(currentWorkOrderId).master || DEFAULT_MASTER_NAME);
   const [employeeProfileModal, setEmployeeProfileModal] = useState<typeof MASTER_PROFILE | null>(null);
   const [employeeProfileSnapshot, setEmployeeProfileSnapshot] = useState<typeof MASTER_PROFILE | null>(null);
   const [employeeProfileMounted, setEmployeeProfileMounted] = useState(false);
   const [employeeProfileActive, setEmployeeProfileActive] = useState(false);
   const [employeeProfileTab, setEmployeeProfileTab] = useState<"main" | "kpi" | "orders">("main");
-  const [employeeOrdersSection, setEmployeeOrdersSection] = useState<"active" | "recentlyDone" | "delayed">("active");
+  const [employeeOrdersSection, setEmployeeOrdersSection] = useState<"active" | "recentlyDone">("active");
   const profileExitFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const profileExitingRef = useRef(false);
   const addWorkExitFallbackRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const addWorkExitingRef = useRef(false);
+  const addWorkCatalogSelectedBtnRef = useRef<HTMLButtonElement | null>(null);
   const openProfileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [carPhotos, setCarPhotos] = useState<string[]>(initialCarPhotoItems);
+  const [carDocumentsCurrent, setCarDocumentsCurrent] = useState<CarDocumentRow[]>(() =>
+    initialCarDocumentNames.map((name, i) => ({ id: `doc-seed-${i}`, name })),
+  );
+  const [carDocumentsArchived, setCarDocumentsArchived] = useState<CarDocumentRow[]>([]);
+  const [documentsScope, setDocumentsScope] = useState<"current" | "archived">("current");
+  const [documentActionsModal, setDocumentActionsModal] = useState<{
+    title: string;
+    docId: string;
+    scope: "documentsCurrent" | "documentsArchived";
+  } | null>(null);
+  const [archivingDocRowId, setArchivingDocRowId] = useState<string | null>(null);
+  const documentUploadInputRef = useRef<HTMLInputElement>(null);
+  const documentBlobUrlsRef = useRef<Set<string>>(new Set());
   const [newlyAddedPhoto, setNewlyAddedPhoto] = useState<string | null>(null);
   const [selectedPhotoIndex, setSelectedPhotoIndex] = useState<number | null>(null);
   const [addPhotoModalOpen, setAddPhotoModalOpen] = useState(false);
   const [newPhotoUrl, setNewPhotoUrl] = useState("");
   const [newPhotoPreview, setNewPhotoPreview] = useState("");
   const [addWorkModalOpen, setAddWorkModalOpen] = useState(false);
+  const [addWorkEditWorksTarget, setAddWorkEditWorksTarget] = useState<{
+    workId: string;
+    listScope: "current" | "completed" | "archived";
+    originalTitle: string;
+  } | null>(null);
+  const [addWorkEditPartsTarget, setAddWorkEditPartsTarget] = useState<{
+    partId: string;
+    listScope: "current" | "archived";
+    originalTitle: string;
+    originalQuantityStr: string;
+  } | null>(null);
+  const [addCatalogTarget, setAddCatalogTarget] = useState<"works" | "parts">("works");
   const [addWorkModalMounted, setAddWorkModalMounted] = useState(false);
   const [addWorkModalActive, setAddWorkModalActive] = useState(false);
   const [addWorkSearchQuery, setAddWorkSearchQuery] = useState("");
-  const [addWorkCategory, setAddWorkCategory] = useState<(typeof workCatalogSections)[number]["label"]>("Все работы");
+  const [addWorkCategory, setAddWorkCategory] = useState<string>("Все работы");
   const [selectedWorkCatalogItem, setSelectedWorkCatalogItem] = useState<{ title: string; price: number; durationMin: number } | null>(null);
-  const [extraCurrentWorks, setExtraCurrentWorks] = useState<WorkRow[]>([]);
+  const [addPartQuantityInput, setAddPartQuantityInput] = useState("");
+  const [currentWorksData, setCurrentWorksData] = useState<WorkRow[]>(() => generateWorkRowsByOrderId(currentWorkOrderId).current);
+  const [completedWorksData, setCompletedWorksData] = useState<WorkRow[]>(() => generateWorkRowsByOrderId(currentWorkOrderId).completed);
+  const [partsCurrentData, setPartsCurrentData] = useState<PartRow[]>(() => partsCurrentRows);
+  const [partsArchivedData, setPartsArchivedData] = useState<PartRow[]>([]);
+  const [partsScope, setPartsScope] = useState<"current" | "archived">("current");
+  const [archivedWorksData, setArchivedWorksData] = useState<WorkRow[]>([]);
+  const detailsStateHydratedRef = useRef(false);
+  const [detailsStateReady, setDetailsStateReady] = useState(false);
+  const [archivingWorkRowId, setArchivingWorkRowId] = useState<string | null>(null);
   const [workStatusById, setWorkStatusById] = useState<Record<string, { label: string; kind: WorkStatusKind }>>({});
   const [highlightedWorkId, setHighlightedWorkId] = useState<string | null>(null);
-  const [clientFields, setClientFields] = useState(publicProfileFields);
-  const [vehicleFields, setVehicleFields] = useState(carProfileFields);
+  function onHighlightBorderAnimationEnd(e: AnimationEvent, entityId: string) {
+    if (e.animationName !== "workRowHighlightBorder") return;
+    setHighlightedWorkId((cur) => (cur === entityId ? null : cur));
+  }
+  function applyStatusToWorkLists(workId: string, statusLabel: string, statusKind: WorkStatusKind) {
+    const patchList = (rows: WorkRow[]): WorkRow[] => {
+      let changed = false;
+      const next = rows.map((row) => {
+        if (row[5] !== workId) return row;
+        changed = true;
+        return [row[0], statusLabel, row[2], statusKind, row[4], row[5]] as WorkRow;
+      });
+      return changed ? next : rows;
+    };
+    setCurrentWorksData((prev) => patchList(prev));
+    setCompletedWorksData((prev) => patchList(prev));
+    setArchivedWorksData((prev) => patchList(prev));
+  }
+  const [clientFields, setClientFields] = useState(() => buildClientFields(fallbackWorkOrderMeta(currentWorkOrderId)));
+  const [vehicleFields, setVehicleFields] = useState(() => buildVehicleFields(fallbackWorkOrderMeta(currentWorkOrderId)));
   const [isEditingFields, setIsEditingFields] = useState(false);
   const assignedMasterFullName = masterFullNameByName[assignedMasterName] ?? assignedMasterName;
   const assignedMasterPhoto = masterPhotoByName[assignedMasterName] ?? "https://i.pravatar.cc/80";
@@ -481,30 +935,37 @@ export function WorkOrdersDetailsPage() {
   const assignedMasterNameParts = assignedMasterFullName.split(" ");
   const assignedMasterFirstLine = assignedMasterNameParts.slice(0, 2).join(" ");
   const assignedMasterSecondLine = assignedMasterNameParts.slice(2).join(" ");
-  const currentWorkOrderStatus =
-    workOrdersSourceRows.find((row) => row.id === CURRENT_WORK_ORDER_ID)?.status ?? "Новый";
+  const currentWorkOrderStatus = orderMeta.status || "Новый";
+  const currentWorkOrderStatusColor = workStatusColorMap[currentWorkOrderStatus] ?? "#ACACAC";
   const assignedMasterProfileMeta =
     masterProfileMetaByName[assignedMasterName] ??
     { birthDate: "-", gender: "-", citizenship: "-", phone: "-", email: "-", role: "Мастер", schedule: "5/2, 8:00 - 20:00", status: "-" };
   const visibleFields = displayedTab === "client" ? clientFields : vehicleFields;
+  const clientNameLines = splitToTwoLines(clientFields.find((field) => field.label === "ФИО")?.value ?? orderMeta.client);
+  const carNameLines = splitToTwoLines(vehicleFields.find((field) => field.label === "Марка и модель")?.value ?? orderMeta.car);
+  const displayClientFirstLine = orderMetaHydrated ? clientNameLines.first : "";
+  const displayClientSecondLine = orderMetaHydrated ? clientNameLines.second : "";
+  const displayMasterFirstLine = orderMetaHydrated ? assignedMasterFirstLine : "";
+  const displayMasterSecondLine = orderMetaHydrated ? assignedMasterSecondLine : "";
+  const displayMasterFullName = orderMetaHydrated ? assignedMasterFullName : "";
+  const identityVisibilityClass = orderMetaHydrated ? "opacity-100" : "opacity-0";
   const totalOrders = clientCars.reduce((sum, car) => sum + car.orders, 0);
   const totalAmount = clientCars.reduce((sum, car) => sum + car.amount, 0);
   const averageCheck = totalOrders > 0 ? Math.round(totalAmount / totalOrders) : 0;
   const formatCurrency = (value: number) => `${value.toLocaleString("ru-RU")} ₽`;
-  const currentWorks = useMemo(() => [...extraCurrentWorks, ...workOrderCurrentWorks], [extraCurrentWorks]);
-  const allWorks = [...currentWorks, ...workOrderCompletedWorks];
+  const currentWorks = currentWorksData;
+  const allWorks = [...currentWorks, ...completedWorksData];
   const worksSubtotal = allWorks.reduce((sum, [, , amount]) => sum + parseRubAmount(amount), 0);
-  const partsSubtotal = Math.round(worksSubtotal * 0.35);
+  const partsSubtotal = partsCurrentData.reduce((sum, row) => sum + parseRubAmount(String(row[2])), 0);
   const grossSubtotal = worksSubtotal + partsSubtotal;
   const discountAmount = Math.round(grossSubtotal * 0.07);
   const totalToPay = grossSubtotal - discountAmount;
-  const paidAmount = Math.round(totalToPay * 0.62);
-  const dueAmount = Math.max(totalToPay - paidAmount, 0);
+  const totalWorksCount = detailsStateReady ? currentWorksData.length + completedWorksData.length + archivedWorksData.length : 0;
   const employeeKpiCards = useMemo(() => {
-    const closedWorks = workOrderCompletedWorks.length;
+    const closedWorks = completedWorksData.length;
     const activeWorks = currentWorks.length;
     const totalWorksCount = closedWorks + activeWorks;
-    const closedRevenue = workOrderCompletedWorks.reduce((sum, [, , amount]) => sum + parseRubAmount(amount), 0);
+    const closedRevenue = completedWorksData.reduce((sum, [, , amount]) => sum + parseRubAmount(amount), 0);
     const activeRevenueForecast = Math.round(
       currentWorks.reduce((sum, [, , amount]) => sum + parseRubAmount(amount), 0) * 0.55,
     );
@@ -526,48 +987,26 @@ export function WorkOrdersDetailsPage() {
       { title: "Средний чек", value: formatCurrency(avgCheck), note: `↑ +${Math.max(300, Math.round(avgCheck * 0.07)).toLocaleString("ru-RU")} ₽ за неделю` },
       { title: "Зарплата (расчёт)", value: formatCurrency(salary + extraSales), note: `включая доп. продажи ${formatCurrency(extraSales)}` },
     ];
-  }, [currentWorks, formatCurrency, partsSubtotal]);
-  const masterDelayedOrderItems = useMemo(() => {
-    const now = new Date();
-    return workOrdersSourceRows
-      .filter(
-        (row) =>
-          row.master === assignedMasterName &&
-          isDelayedWorkOrderByPageRules(row.status, row.dueDate, now),
-      )
-      .map((row) => ({
-        type: "Заказ-наряд",
-        text: `Заказ-наряд №${row.id} · ${row.car}`,
-        icon: "/group87.svg",
-      }));
-  }, [assignedMasterName]);
+  }, [currentWorks, completedWorksData, formatCurrency, partsSubtotal]);
   const masterActiveOrderItems = useMemo(() => {
-    const today = new Date();
-    return workOrdersSourceRows
+    return allWorkOrdersMeta
       .filter((row) => {
         if (row.master !== assignedMasterName) return false;
-        if (row.status !== "Новый" && row.status !== "В работе") return false;
-        const acceptedAt = parseRuDate(row.dueDate);
-        if (!acceptedAt) return false;
-        return (
-          acceptedAt.getFullYear() === today.getFullYear() &&
-          acceptedAt.getMonth() === today.getMonth() &&
-          acceptedAt.getDate() === today.getDate()
-        );
+        return row.status === "Новый" || row.status === "В работе" || row.status === "Ожидание запчастей";
       })
       .map((row) => ({
         type: "Заказ-наряд",
         text: `Заказ-наряд №${row.id} · ${row.car}`,
         icon: "/group87.svg",
       }));
-  }, [assignedMasterName]);
+  }, [allWorkOrdersMeta, assignedMasterName]);
   const masterCompletedOrderItems = useMemo(() => {
     const now = new Date();
     const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    return workOrdersSourceRows
+    return allWorkOrdersMeta
       .filter((row) => {
         if (row.master !== assignedMasterName) return false;
-        if (row.status !== "Закрыт" && row.status !== "Отказ клиента") return false;
+        if (row.status !== "Готово" && row.status !== "Закрыт") return false;
         const acceptedAt = parseRuDate(row.dueDate);
         if (!acceptedAt) return false;
         const diffMs = now.getTime() - acceptedAt.getTime();
@@ -578,16 +1017,17 @@ export function WorkOrdersDetailsPage() {
         text: `Заказ-наряд №${row.id} · ${row.car}`,
         icon: "/group87.svg",
       }));
-  }, [assignedMasterName]);
+  }, [allWorkOrdersMeta, assignedMasterName]);
   const availableMasters = useMemo(
     () =>
-      [...new Set(workOrdersSourceRows.map((row) => row.master))]
+      [...new Set(allWorkOrdersMeta.map((row) => row.master))]
         .filter((masterName) => masterName !== assignedMasterName)
         .sort((a, b) => a.localeCompare(b, "ru")),
-    [assignedMasterName],
+    [allWorkOrdersMeta, assignedMasterName],
   );
   const filteredWorks = useMemo(() => {
-    const sourceRows = worksScope === "current" ? currentWorks : workOrderCompletedWorks;
+    const sourceRows =
+      worksScope === "current" ? currentWorksData : worksScope === "completed" ? completedWorksData : archivedWorksData;
     const normalizedRows = sourceRows.map((row, sourceIndex) => {
       const [title, statusLabel, amount, kind, addedDate, workId] = row;
       const rowWorkId = workId ?? `${worksScope}-base-${sourceIndex}`;
@@ -604,35 +1044,235 @@ export function WorkOrdersDetailsPage() {
     const query = workSearchQuery.trim().toLowerCase();
     if (!query) return normalizedRows;
     return normalizedRows.filter((row) => row.title.toLowerCase().includes(query));
-  }, [worksScope, workSearchQuery, currentWorks, workStatusById]);
+  }, [worksScope, workSearchQuery, currentWorksData, completedWorksData, archivedWorksData, workStatusById]);
+
+  const filteredPartsRows = useMemo(() => {
+    const rows = partsScope === "current" ? partsCurrentData : partsArchivedData;
+    const q = partsSearchQuery.trim().toLowerCase();
+    if (!q) return rows;
+    return rows.filter((row) => String(row[0]).toLowerCase().includes(q));
+  }, [partsScope, partsSearchQuery, partsCurrentData, partsArchivedData]);
+
+  const filteredDocumentsList = useMemo(() => {
+    const list = documentsScope === "current" ? carDocumentsCurrent : carDocumentsArchived;
+    const q = documentsSearchQuery.trim().toLowerCase();
+    if (!q) return list;
+    return list.filter((doc) => doc.name.toLowerCase().includes(q));
+  }, [documentsScope, documentsSearchQuery, carDocumentsCurrent, carDocumentsArchived]);
 
   const filteredCatalogWorks = useMemo(() => {
+    if (addCatalogTarget === "parts") {
+      const allPartItemsRaw = partsCatalogSections.flatMap((section) => (section.label === "Все запчасти" ? [] : section.items));
+      const allPartItems = Array.from(
+        new Map(allPartItemsRaw.map((item) => [normalizeSearchText(item.title), item])).values(),
+      );
+      const categoryPartItems =
+        addWorkCategory === "Все запчасти"
+          ? allPartItems
+          : (partsCatalogSections.find((section) => section.label === addWorkCategory)?.items ?? []);
+      const uniqueCategoryItems = Array.from(
+        new Map(categoryPartItems.map((item) => [normalizeSearchText(item.title), item])).values(),
+      );
+      const pricedItems = uniqueCategoryItems.map((item) => ({
+        title: item.title,
+        price: item.price,
+        durationMin: 0,
+      }));
+      return filterCatalogByQuery(pricedItems, addWorkSearchQuery);
+    }
     const allItems = workCatalogSections.flatMap((section) => (section.label === "Все работы" ? [] : section.items));
     const categoryItems =
       addWorkCategory === "Все работы"
         ? [...new Set(allItems)]
         : workCatalogSections.find((section) => section.label === addWorkCategory)?.items ?? [];
-    const query = normalizeSearchText(addWorkSearchQuery);
     const pricedItems = categoryItems.map((title) => ({
       title,
       price: 1500 + title.length * 120,
       durationMin: 20 + (title.length % 9) * 10,
     }));
-    if (!query) return pricedItems;
-    const exactMatches = pricedItems.filter((item) => normalizeSearchText(item.title) === query);
-    if (exactMatches.length > 0) return exactMatches;
-
-    const startsWithMatches = pricedItems.filter((item) => normalizeSearchText(item.title).startsWith(query));
-    if (startsWithMatches.length > 0) return startsWithMatches;
-
-    return pricedItems.filter((item) => normalizeSearchText(item.title).includes(query));
-  }, [addWorkSearchQuery, addWorkCategory]);
+    return filterCatalogByQuery(pricedItems, addWorkSearchQuery);
+  }, [addWorkSearchQuery, addWorkCategory, addCatalogTarget]);
   const leftContentMotionClass = useMemo(() => {
     if (leftContentPhase === "out") return "animate-[workOrderLeftOut_180ms_ease_forwards]";
     if (leftContentPhase === "in") return "animate-[workOrderLeftIn_240ms_cubic-bezier(0.22,1,0.36,1)_forwards]";
     return "";
   }, [leftContentPhase]);
   const [searchParams, setSearchParams] = useSearchParams();
+
+  useEffect(() => {
+    setOrderMetaHydrated(false);
+    let cancelled = false;
+
+    async function hydrateOrderMeta() {
+      const fallback = fallbackWorkOrderMeta(currentWorkOrderId);
+      if (!isWorkOrdersRemoteEnabled()) {
+        if (!cancelled) {
+          setOrderMeta(fallback);
+          setAllWorkOrdersMeta(workOrdersSourceRows.map(mapSourceRowToMeta));
+          setOrderMetaHydrated(true);
+        }
+        return;
+      }
+
+      try {
+        const rows = await listWorkOrdersStorageRows();
+        if (cancelled) return;
+        const mappedRows = rows.map(mapWorkOrderStorageToMeta);
+        setAllWorkOrdersMeta(mappedRows);
+        const matched = rows.find((row) => row.id === currentWorkOrderId);
+        setOrderMeta(matched ? mapWorkOrderStorageToMeta(matched) : fallback);
+        setOrderMetaHydrated(true);
+      } catch {
+        if (!cancelled) {
+          setOrderMeta(fallback);
+          setAllWorkOrdersMeta(workOrdersSourceRows.map(mapSourceRowToMeta));
+          setOrderMetaHydrated(true);
+        }
+      }
+    }
+
+    void hydrateOrderMeta();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWorkOrderId]);
+
+  useEffect(() => {
+    setAssignedMasterName(orderMeta.master || DEFAULT_MASTER_NAME);
+    setClientFields(buildClientFields(orderMeta));
+    setVehicleFields(buildVehicleFields(orderMeta));
+    setIsEditingFields(false);
+  }, [orderMeta]);
+
+  useEffect(() => {
+    // Prevent cross-order overwrite: block save until current order is hydrated.
+    detailsStateHydratedRef.current = false;
+    setDetailsStateReady(false);
+    setCurrentWorksData([]);
+    setCompletedWorksData([]);
+    setArchivedWorksData([]);
+    setPartsCurrentData([]);
+    setPartsArchivedData([]);
+  }, [currentWorkOrderId]);
+
+  useEffect(() => {
+    if (isWorkOrderDetailsRemoteEnabled()) return;
+    const generated = generateWorkRowsByOrderId(currentWorkOrderId);
+    setCurrentWorksData(generated.current);
+    setCompletedWorksData(generated.completed);
+    setArchivedWorksData([]);
+    setPartsCurrentData(partsCurrentRows);
+    setPartsArchivedData([]);
+    detailsStateHydratedRef.current = true;
+    setDetailsStateReady(true);
+  }, [currentWorkOrderId]);
+
+  useEffect(() => {
+    if (!isWorkOrderDetailsRemoteEnabled()) {
+      detailsStateHydratedRef.current = true;
+      return;
+    }
+    let cancelled = false;
+    async function hydrateDetailsState() {
+      try {
+        const state = await loadWorkOrderDetailsState(currentWorkOrderId);
+        if (cancelled) return;
+        if (state) {
+          setCurrentWorksData(Array.isArray(state.works_current) ? (state.works_current as WorkRow[]) : []);
+          setCompletedWorksData(Array.isArray(state.works_completed) ? (state.works_completed as WorkRow[]) : []);
+          setArchivedWorksData(Array.isArray(state.works_archived) ? (state.works_archived as WorkRow[]) : []);
+          setPartsCurrentData(Array.isArray(state.parts_current) ? (state.parts_current as PartRow[]) : []);
+          setPartsArchivedData(Array.isArray(state.parts_archived) ? (state.parts_archived as PartRow[]) : []);
+          if (Array.isArray(state.client_fields) && state.client_fields.length > 0) {
+            setClientFields(state.client_fields);
+          }
+          if (Array.isArray(state.vehicle_fields) && state.vehicle_fields.length > 0) {
+            setVehicleFields(state.vehicle_fields);
+          }
+          setCarPhotos(Array.isArray(state.car_photos) && state.car_photos.length > 0 ? state.car_photos : initialCarPhotoItems);
+          setCarDocumentsCurrent(Array.isArray(state.documents_current) ? state.documents_current : []);
+          setCarDocumentsArchived(Array.isArray(state.documents_archived) ? state.documents_archived : []);
+        } else {
+          const generated = generateWorkRowsByOrderId(currentWorkOrderId);
+          setCurrentWorksData(generated.current);
+          setCompletedWorksData(generated.completed);
+          setArchivedWorksData([]);
+          setPartsCurrentData(partsCurrentRows);
+          setPartsArchivedData([]);
+          setCarPhotos(initialCarPhotoItems);
+          setCarDocumentsCurrent(initialCarDocumentNames.map((name, i) => ({ id: `doc-seed-${i}`, name })));
+          setCarDocumentsArchived([]);
+        }
+      } catch (error) {
+        console.warn("Failed to hydrate work-order details state from API.", error);
+      } finally {
+        if (!cancelled) {
+          detailsStateHydratedRef.current = true;
+          setDetailsStateReady(true);
+        }
+      }
+    }
+    void hydrateDetailsState();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWorkOrderId]);
+
+  useEffect(() => {
+    if (!isWorkOrderDetailsRemoteEnabled()) return;
+    if (!detailsStateHydratedRef.current) return;
+    const payload: WorkOrderDetailsStateStorage = {
+      work_order_id: currentWorkOrderId,
+      works_current: currentWorksData,
+      works_completed: completedWorksData,
+      works_archived: archivedWorksData,
+      parts_current: partsCurrentData,
+      parts_archived: partsArchivedData,
+      client_fields: clientFields,
+      vehicle_fields: vehicleFields,
+      car_photos: carPhotos,
+      documents_current: carDocumentsCurrent,
+      documents_archived: carDocumentsArchived,
+    };
+    void saveWorkOrderDetailsState(payload).catch((error) => {
+      console.warn("Failed to save work-order details state to API.", error);
+    });
+  }, [
+    currentWorkOrderId,
+    currentWorksData,
+    completedWorksData,
+    archivedWorksData,
+    partsCurrentData,
+    partsArchivedData,
+    clientFields,
+    vehicleFields,
+    carPhotos,
+    carDocumentsCurrent,
+    carDocumentsArchived,
+  ]);
+
+  useEffect(() => {
+    if (!isWorkOrdersRemoteEnabled()) return;
+    const currentAmountRub = parseRubAmount(orderMeta.amount ?? "");
+    if (currentAmountRub === totalToPay) return;
+    const nextAmount = formatCurrency(totalToPay);
+    const syncTimer = window.setTimeout(() => {
+      void updateWorkOrdersStorageRows([currentWorkOrderId], { amount: nextAmount })
+        .then(() => {
+          setOrderMeta((prev) => ({ ...prev, amount: nextAmount }));
+          setAllWorkOrdersMeta((prev) =>
+            prev.map((row) => (row.id === currentWorkOrderId ? { ...row, amount: nextAmount } : row)),
+          );
+        })
+        .catch((error) => {
+          console.warn("Failed to sync work-order amount with finance summary.", error);
+        });
+    }, 250);
+
+    return () => {
+      window.clearTimeout(syncTimer);
+    };
+  }, [currentWorkOrderId, orderMeta.amount, totalToPay]);
 
   useEffect(() => {
     if (activeTab === displayedTab) return;
@@ -660,6 +1300,15 @@ export function WorkOrdersDetailsPage() {
   }, [workActionsModal]);
 
   useEffect(() => {
+    if (!documentActionsModal) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setDocumentActionsModal(null);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [documentActionsModal]);
+
+  useEffect(() => {
     if (!workStatusPicker) return;
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setWorkStatusPicker(null);
@@ -673,24 +1322,67 @@ export function WorkOrdersDetailsPage() {
   }, [switchMasterModalOpen]);
 
   useEffect(() => {
+    return () => {
+      documentBlobUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      documentBlobUrlsRef.current.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      window.sessionStorage.removeItem("workFocusId");
+    };
+  }, []);
+
+  useLayoutEffect(() => {
     const focusWorkId = searchParams.get("focusWorkId");
+    if (!focusWorkId) return;
+
     const armedFocusId = window.sessionStorage.getItem("workFocusId");
-    if (!focusWorkId || armedFocusId !== focusWorkId) return;
-    window.sessionStorage.removeItem("workFocusId");
-    setActiveCarPanel("orders");
-    setWorksScope("current");
-    setHighlightedWorkId(focusWorkId);
-    // Consume the flag immediately so later rerenders won't retrigger highlight.
+    const shouldHighlight = armedFocusId === focusWorkId;
+
+    if (shouldHighlight) {
+      window.sessionStorage.removeItem("workFocusId");
+      const panel = searchParams.get("panel");
+      const worksScopeParam = searchParams.get("worksScope");
+      const partsScopeParam = searchParams.get("partsScope");
+      const documentsScopeParam = searchParams.get("documentsScope");
+      if (panel === "parts") {
+        setActiveCarPanel("parts");
+        if (partsScopeParam === "archived") {
+          setPartsScope("archived");
+        } else {
+          setPartsScope("current");
+        }
+      } else if (panel === "documents") {
+        setActiveCarPanel("documents");
+        if (documentsScopeParam === "archived") {
+          setDocumentsScope("archived");
+        } else {
+          setDocumentsScope("current");
+        }
+      } else {
+        setActiveCarPanel("orders");
+        if (worksScopeParam === "archived") {
+          setWorksScope("archived");
+        } else if (worksScopeParam === "completed") {
+          setWorksScope("completed");
+        } else {
+          setWorksScope("current");
+        }
+      }
+      setHighlightedWorkId(focusWorkId);
+    }
+
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev);
       next.delete("focusWorkId");
       next.delete("panel");
+      next.delete("worksScope");
+      next.delete("partsScope");
+      next.delete("documentsScope");
       return next;
     }, { replace: true });
-    const clearId = window.setTimeout(() => setHighlightedWorkId(null), 4000);
-    return () => {
-      window.clearTimeout(clearId);
-    };
   }, [searchParams, setSearchParams]);
 
   useEffect(() => {
@@ -703,8 +1395,24 @@ export function WorkOrdersDetailsPage() {
       setAddWorkModalMounted(true);
       setAddWorkModalActive(false);
       setAddWorkSearchQuery("");
-      setSelectedWorkCatalogItem(null);
-      setAddWorkCategory("Все работы");
+      setAddPartQuantityInput("");
+      if (addCatalogTarget === "parts") {
+        if (addWorkEditPartsTarget) {
+          setAddWorkCategory(findPartsCatalogCategoryForTitle(addWorkEditPartsTarget.originalTitle));
+          setSelectedWorkCatalogItem(catalogPartItemFromTitle(addWorkEditPartsTarget.originalTitle));
+          setAddPartQuantityInput(addWorkEditPartsTarget.originalQuantityStr);
+        } else {
+          setAddWorkCategory("Все запчасти");
+          setSelectedWorkCatalogItem(null);
+          setAddPartQuantityInput("");
+        }
+      } else if (addWorkEditWorksTarget) {
+        setAddWorkCategory(findWorkCatalogCategoryForTitle(addWorkEditWorksTarget.originalTitle));
+        setSelectedWorkCatalogItem(catalogWorkItemFromTitle(addWorkEditWorksTarget.originalTitle));
+      } else {
+        setAddWorkCategory("Все работы");
+        setSelectedWorkCatalogItem(null);
+      }
       const id = requestAnimationFrame(() => {
         requestAnimationFrame(() => {
           window.setTimeout(() => setAddWorkModalActive(true), 90);
@@ -721,21 +1429,30 @@ export function WorkOrdersDetailsPage() {
     }
     addWorkExitingRef.current = true;
     setAddWorkModalActive(false);
-  }, [addWorkModalOpen]);
+  }, [addWorkModalOpen, addCatalogTarget, addWorkEditWorksTarget, addWorkEditPartsTarget]);
 
-  useEffect(() => {
-    const raw = window.localStorage.getItem(workOrderMasterOverrideStorageKey);
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as Record<string, string>;
-      const overrideMaster = parsed[CURRENT_WORK_ORDER_ID];
-      if (overrideMaster) {
-        setAssignedMasterName(overrideMaster);
-      }
-    } catch {
-      // ignore invalid storage payload
-    }
-  }, []);
+  useLayoutEffect(() => {
+    const worksEdit = addCatalogTarget === "works" && addWorkEditWorksTarget && selectedWorkCatalogItem;
+    const partsEdit = addCatalogTarget === "parts" && addWorkEditPartsTarget && selectedWorkCatalogItem;
+    if (!addWorkModalOpen || !addWorkModalActive || !(worksEdit || partsEdit)) return;
+    const btn = addWorkCatalogSelectedBtnRef.current;
+    if (!btn) return;
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        btn.scrollIntoView({ block: "center", inline: "nearest" });
+      });
+    });
+    return () => cancelAnimationFrame(id);
+  }, [
+    addWorkModalOpen,
+    addWorkModalActive,
+    addCatalogTarget,
+    addWorkEditWorksTarget,
+    addWorkEditPartsTarget,
+    selectedWorkCatalogItem?.title,
+    addWorkCategory,
+    addWorkSearchQuery,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -788,6 +1505,8 @@ export function WorkOrdersDetailsPage() {
 
   function finishAddWorkExit() {
     setAddWorkModalMounted(false);
+    setAddWorkEditWorksTarget(null);
+    setAddWorkEditPartsTarget(null);
     if (addWorkExitFallbackRef.current) {
       clearTimeout(addWorkExitFallbackRef.current);
       addWorkExitFallbackRef.current = null;
@@ -852,10 +1571,129 @@ export function WorkOrdersDetailsPage() {
     setNewPhotoPreview("");
   }
 
+  function updateSelectedIndexAfterRemove(sel: number | null, removedIndex: number, oldLength: number): number | null {
+    if (sel === null) return null;
+    if (oldLength <= 1) return null;
+    const newLength = oldLength - 1;
+    if (newLength === 0) return null;
+    if (sel < removedIndex) return sel;
+    if (sel > removedIndex) return sel - 1;
+    return removedIndex < oldLength - 1 ? removedIndex : removedIndex - 1;
+  }
+
+  function removeCarPhotoAtIndex(removedIndex: number) {
+    const oldList = carPhotos;
+    const oldLen = oldList.length;
+    if (removedIndex < 0 || removedIndex >= oldLen) return;
+    const url = oldList[removedIndex];
+    if (url.startsWith("blob:")) {
+      URL.revokeObjectURL(url);
+    }
+    setNewlyAddedPhoto((n) => (n === url ? null : n));
+    setCarPhotos((prev) => prev.filter((_, i) => i !== removedIndex));
+    setSelectedPhotoIndex((sel) => updateSelectedIndexAfterRemove(sel, removedIndex, oldLen));
+  }
+
   function navigateToWorkOrderFromCard(text: string) {
     const workOrderId = extractWorkOrderIdFromCardText(text);
     if (!workOrderId) return;
+    window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, workOrderId);
     navigate(`/work-orders?workOrder=${workOrderId}`);
+  }
+
+  function triggerDocumentUpload() {
+    documentUploadInputRef.current?.click();
+  }
+
+  function handleDocumentFileInputChange(e: ChangeEvent<HTMLInputElement>) {
+    const input = e.currentTarget;
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    const id =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `doc-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const blobUrl = URL.createObjectURL(file);
+    documentBlobUrlsRef.current.add(blobUrl);
+    setCarDocumentsCurrent((prev) => [{ id, name: file.name, blobUrl }, ...prev]);
+    window.setTimeout(() => {
+      emitArchiveStyleToast({
+        line1: file.name,
+        line2: "добавлен в раздел документов",
+        navigateTo:
+          id !== ""
+            ? `/work-orders/${currentWorkOrderId}?panel=documents&documentsScope=current&focusWorkId=${encodeURIComponent(id)}`
+            : undefined,
+      });
+    }, 60);
+  }
+
+  function printFinanceReceipt() {
+    const escapeHtml = (raw: string) =>
+      raw.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+    const carLabel = orderMeta.car ?? "—";
+    const printedAt = new Date().toLocaleString("ru-RU", { dateStyle: "long", timeStyle: "short" });
+    const orderNo = escapeHtml(currentWorkOrderId);
+
+    const row = (label: string, value: string) =>
+      `<tr><td>${escapeHtml(label)}</td><td>${escapeHtml(value)}</td></tr>`;
+
+    const bodyRows =
+      row("Работы", formatCurrency(worksSubtotal)) +
+      row("Запчасти", formatCurrency(partsSubtotal)) +
+      row("Скидка 7%", `− ${formatCurrency(discountAmount)}`) +
+      row("Количество работ", String(allWorks.length));
+
+    const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8"/><title>Чек №${currentWorkOrderId}</title><style>
+body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:28px;color:#111826;max-width:520px;margin:0 auto;}
+h1{font-size:20px;font-weight:700;margin:0 0 6px;}
+.sub{color:#6F7785;font-size:13px;line-height:1.45;margin-bottom:22px;}
+table{width:100%;border-collapse:collapse;font-size:15px;}
+td{padding:10px 0;border-bottom:1px solid #E2E5EA;vertical-align:top;}
+td:last-child{text-align:right;font-weight:600;white-space:nowrap;}
+tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
+@media print{body{padding:16px;}}
+</style></head><body>
+<h1>Чек по заказ-наряду</h1>
+<div class="sub">№ ${orderNo}<br>${escapeHtml(carLabel)} · ${escapeHtml(assignedMasterFullName)}<br>${escapeHtml(printedAt)}</div>
+<table><tbody>${bodyRows}</tbody><tfoot><tr><td>Итого к оплате</td><td>${escapeHtml(formatCurrency(totalToPay))}</td></tr></tfoot></table>
+<p class="sub" style="margin-top:24px;margin-bottom:0;">Марс</p>
+</body></html>`;
+
+    const w = window.open("", "_blank", "noopener,noreferrer,width=640,height=720");
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    w.focus();
+    window.setTimeout(() => {
+      w.print();
+    }, 200);
+  }
+
+  async function exportFinanceSummaryPdf() {
+    try {
+      await downloadFinanceSummaryPdf({
+        orderId: currentWorkOrderId,
+        carLabel: orderMeta.car ?? "—",
+        masterFullName: assignedMasterFullName,
+        generatedAt: new Date().toLocaleString("ru-RU", { dateStyle: "long", timeStyle: "short" }),
+        worksSubtotal,
+        partsSubtotal,
+        discountAmount,
+        totalToPay,
+        worksCount: allWorks.length,
+        partsCount: partsCurrentData.length,
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Неизвестная ошибка";
+      emitArchiveStyleToast({
+        line1: "Не удалось сформировать PDF",
+        line2: msg,
+      });
+    }
   }
 
   return (
@@ -864,7 +1702,6 @@ export function WorkOrdersDetailsPage() {
         <div className="flex h-full w-full rounded-[16px] bg-black p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
           <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
             <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/dashboard")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="home" /></button>
             <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
             <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
             <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="chat" /></button>
@@ -890,38 +1727,98 @@ export function WorkOrdersDetailsPage() {
           <main className="flex min-h-0 flex-1 flex-col">
             <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
               <div className="flex items-center gap-3">
-                <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.02em] text-[#111826]">Заказ-наряд №593423</h1>
-                <span className="rounded-[10px] bg-[#F3F3F5] px-3 py-2 text-[16px] font-medium tracking-[-0.02em] text-[#111826]">
+                <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.02em] text-[#111826]">{`Заказ-наряд №${currentWorkOrderId}`}</h1>
+                <span
+                  className="rounded-[10px] px-3 py-2 text-[16px] font-medium tracking-[-0.02em]"
+                  style={{ backgroundColor: currentWorkOrderStatusColor, color: "#FFFFFF" }}
+                >
                   {currentWorkOrderStatus}
                 </span>
                 <div className="ml-auto flex items-center gap-1.5">
-                  <div className="relative">
-                    <input
-                      value={activeCarPanel === "orders" ? workSearchQuery : ""}
-                      onChange={(e) => {
-                        if (activeCarPanel === "orders") setWorkSearchQuery(e.target.value);
-                      }}
-                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
-                      placeholder={activeCarPanel === "orders"
-                        ? "Поиск работы..."
-                        : activeTab === "client"
-                          ? "Поиск автомобиля клиента..."
-                          : "Поиск заказ-наряда..."}
-                    />
-                    {activeCarPanel === "orders" && workSearchQuery.trim() ? (
-                      <button
-                        type="button"
-                        onClick={() => setWorkSearchQuery("")}
-                        aria-label="Очистить поиск"
-                        className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] text-black"
-                      >
-                        <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
-                          <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-                        </svg>
-                      </button>
-                    ) : null}
-                  </div>
-                  <button className="h-12 rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.02em] text-white">
+                  {(activeCarPanel === "orders" || activeCarPanel === "parts" || activeCarPanel === "documents") && (
+                    <div className="relative">
+                      <input
+                        value={
+                          activeCarPanel === "orders"
+                            ? workSearchQuery
+                            : activeCarPanel === "parts"
+                              ? partsSearchQuery
+                              : documentsSearchQuery
+                        }
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (activeCarPanel === "orders") setWorkSearchQuery(v);
+                          else if (activeCarPanel === "parts") setPartsSearchQuery(v);
+                          else setDocumentsSearchQuery(v);
+                        }}
+                        className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                        placeholder={
+                          activeCarPanel === "orders"
+                            ? "Поиск работы..."
+                            : activeCarPanel === "parts"
+                              ? "Поиск запчасти..."
+                              : "Поиск документа..."
+                        }
+                      />
+                      {activeCarPanel === "orders" && workSearchQuery.trim() ? (
+                        <button
+                          type="button"
+                          onClick={() => setWorkSearchQuery("")}
+                          aria-label="Очистить поиск"
+                          className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] text-black"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
+                            <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      ) : activeCarPanel === "parts" && partsSearchQuery.trim() ? (
+                        <button
+                          type="button"
+                          onClick={() => setPartsSearchQuery("")}
+                          aria-label="Очистить поиск"
+                          className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] text-black"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
+                            <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      ) : activeCarPanel === "documents" && documentsSearchQuery.trim() ? (
+                        <button
+                          type="button"
+                          onClick={() => setDocumentsSearchQuery("")}
+                          aria-label="Очистить поиск"
+                          className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] text-black"
+                        >
+                          <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
+                            <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    className="h-12 cursor-pointer rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.02em] text-white"
+                    aria-label="Позвонить клиенту"
+                    onClick={() => {
+                      const phoneField = clientFields.find((f) => f.label === "Телефон");
+                      const raw = phoneField?.value?.trim() ?? "";
+                      const digits = raw.replace(/\D/g, "");
+                      if (digits.length < 10) {
+                        emitArchiveStyleToast({
+                          line1: "Нет номера для звонка",
+                          line2: "Проверьте поле «Телефон» в карточке клиента",
+                        });
+                        return;
+                      }
+                      const telHref = toTelHref(raw);
+                      const callLink = document.createElement("a");
+                      callLink.href = telHref;
+                      document.body.appendChild(callLink);
+                      callLink.click();
+                      document.body.removeChild(callLink);
+                    }}
+                  >
                     Позвонить клиенту
                   </button>
                 </div>
@@ -936,16 +1833,16 @@ export function WorkOrdersDetailsPage() {
                     className="flex items-start justify-between gap-4 transition-all duration-350 ease-out"
                   >
                     <div>
-                      <h1 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
+                      <h1 className={`max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636] transition-opacity duration-150 ${identityVisibilityClass}`}>
                         {displayedTab === "client" ? (
                           <>
-                            <span className="block whitespace-nowrap">Смирнова Наталья</span>
-                            <span className="block">Викторовна</span>
+                            <span className="block whitespace-nowrap">{displayClientFirstLine || " "}</span>
+                            {displayClientSecondLine ? <span className="block">{displayClientSecondLine}</span> : <span className="block"> </span>}
                           </>
                         ) : (
                           <>
-                            <span className="block whitespace-nowrap">BMW M5 F90</span>
-                            <span className="block">Competition</span>
+                            <span className="block whitespace-nowrap">{carNameLines.first || " "}</span>
+                            {carNameLines.second ? <span className="block">{carNameLines.second}</span> : null}
                           </>
                         )}
                       </h1>
@@ -1039,11 +1936,12 @@ export function WorkOrdersDetailsPage() {
                 </div>
               </section>
 
-              <section className="relative z-20 min-w-0 flex-1 rounded-[16px] bg-white p-6">
+              <section className="relative z-20 min-w-0 flex-1 rounded-t-[16px] rounded-b-none bg-white p-6">
                 <div className="flex h-full min-h-0 flex-col">
                   <div className="inline-flex w-fit items-center gap-1 rounded-full p-1">
                     {[
                       { label: "Работы", value: "orders" as const },
+                      { label: "Запчасти", value: "parts" as const },
                       { label: "Документы", value: "documents" as const },
                       { label: "Фото автомобиля", value: "photos" as const },
                       { label: "Финансовая сводка", value: "finance" as const },
@@ -1051,7 +1949,11 @@ export function WorkOrdersDetailsPage() {
                       <button
                         key={tab.label}
                         type="button"
-                        onClick={() => setActiveCarPanel(tab.value)}
+                        onClick={() => {
+                          setHighlightedWorkId(null);
+                          window.sessionStorage.removeItem("workFocusId");
+                          setActiveCarPanel(tab.value);
+                        }}
                         className={`rounded-full px-4 py-2 text-[14px] font-medium tracking-[-0.02em] text-black ${
                           activeCarPanel === tab.value
                             ? "bg-[#F8F8FA]"
@@ -1067,42 +1969,119 @@ export function WorkOrdersDetailsPage() {
                     {activeCarPanel === "documents" ? (
                         <article className="relative order-2 mt-[107px] min-h-0 flex-1 rounded-[12px] bg-transparent">
                           <div className="absolute left-0 right-0 top-0 -translate-y-full pb-3">
-                            <div className="flex w-full items-center justify-between">
-                              <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Документы</h3>
-                              <button
-                                type="button"
-                                className="shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
-                              >
-                                Добавить документ
-                              </button>
+                            <div className="flex w-full flex-wrap items-center justify-between gap-3">
+                              <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
+                                Документы{" "}
+                                <span className="tabular-nums text-[#888888]">
+                                  ({carDocumentsCurrent.length + carDocumentsArchived.length})
+                                </span>
+                              </h3>
+                              <div className="ml-auto flex flex-wrap items-center pl-1">
+                                <div className="flex items-center gap-6">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setHighlightedWorkId(null);
+                                      window.sessionStorage.removeItem("workFocusId");
+                                      setDocumentsScope("current");
+                                    }}
+                                    className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                  >
+                                    <ClientsStyleCheckboxBox checked={documentsScope === "current"} />
+                                    <span>Текущие</span>
+                                    <span className="tabular-nums text-[#7D7D7D]">({carDocumentsCurrent.length})</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setHighlightedWorkId(null);
+                                      window.sessionStorage.removeItem("workFocusId");
+                                      setDocumentsScope("archived");
+                                    }}
+                                    className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                  >
+                                    <ClientsStyleCheckboxBox checked={documentsScope === "archived"} />
+                                    <span>Архив</span>
+                                    <span className="tabular-nums text-[#7D7D7D]">({carDocumentsArchived.length})</span>
+                                  </button>
+                                </div>
+                                <input
+                                  ref={documentUploadInputRef}
+                                  type="file"
+                                  className="hidden"
+                                  accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.webp,.xls,.xlsx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                  onChange={handleDocumentFileInputChange}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={triggerDocumentUpload}
+                                  aria-label="Загрузить документ"
+                                  className="ml-[50px] shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
+                                >
+                                  Загрузить документ
+                                </button>
+                              </div>
                             </div>
                           </div>
                           <div className="hide-scrollbar min-h-0 min-w-0 max-h-[598px] space-y-4 overflow-y-auto overflow-x-hidden scroll-smooth rounded-lg bg-transparent">
-                            {carDocumentItems.map((item) => (
-                              <article key={item} className="flex w-full items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3">
-                                <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
-                                  <img src="/document.svg" alt="" className="h-5 w-4" />
-                                </span>
-                                <p className="text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">{item}</p>
-                                <button
-                                  type="button"
-                                  onClick={() => downloadMockDocument(item)}
-                                  className="ml-auto inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-[#EC1C24] text-white"
-                                >
-                                  <img src="/download.svg" alt="" className="h-[19px] w-[18px]" />
-                                </button>
-                              </article>
-                            ))}
+                            {documentsScope === "archived" && carDocumentsArchived.length === 0 ? (
+                              <div className="flex min-h-[200px] items-center justify-center rounded-[12px] bg-[#F3F3F5] px-4 py-10 text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                                В архиве пока нет документов
+                              </div>
+                            ) : filteredDocumentsList.length === 0 ? (
+                              <div className="flex min-h-[200px] items-center justify-center rounded-[12px] bg-[#F3F3F5] px-4 py-10 text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                                Ничего не найдено
+                              </div>
+                            ) : (
+                              filteredDocumentsList.map((doc) => {
+                                const isArchiving = archivingDocRowId === doc.id;
+                                return (
+                                  <article
+                                    key={doc.id}
+                                    className={`flex w-full items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3 ${
+                                      isArchiving ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]" : ""
+                                    }`}
+                                    style={
+                                      highlightedWorkId === doc.id && !isArchiving
+                                        ? { animation: "workRowHighlightBorder 4s ease-out" }
+                                        : undefined
+                                    }
+                                    onAnimationEnd={(e) => onHighlightBorderAnimationEnd(e, doc.id)}
+                                  >
+                                    <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
+                                      <img src="/document.svg" alt="" className="h-5 w-4" />
+                                    </span>
+                                    <p className="min-w-0 flex-1 truncate text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">
+                                      {doc.name}
+                                    </p>
+                                    <button
+                                      type="button"
+                                      className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-[100px] bg-[#EC1C24] text-white"
+                                      onClick={() =>
+                                        setDocumentActionsModal({
+                                          title: doc.name,
+                                          docId: doc.id,
+                                          scope: documentsScope === "archived" ? "documentsArchived" : "documentsCurrent",
+                                        })
+                                      }
+                                      aria-label={`Действия: ${doc.name}`}
+                                    >
+                                      <MoreDotsCircleMenuIcon />
+                                    </button>
+                                  </article>
+                                );
+                              })
+                            )}
                           </div>
                         </article>
                     ) : activeCarPanel === "orders" ? (
-                        <article className="relative order-2 mt-[107px] min-h-0 flex-1 rounded-[12px] bg-transparent">
+                        <article className="relative order-2 mt-[107px] min-h-0 flex-1 rounded-t-[12px] rounded-b-none bg-transparent">
                           <div className="absolute left-0 top-0 -translate-y-full pb-3">
                             <div className="flex items-center">
                               <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Ответственный мастер</h3>
                             </div>
                           </div>
-                          <div className="hide-scrollbar flex min-h-0 min-w-0 max-h-[598px] flex-col gap-4 overflow-y-auto overflow-x-hidden scroll-smooth rounded-lg bg-transparent pr-1">
+                          <div className="hide-scrollbar flex min-h-0 min-w-0 max-h-[598px] flex-col gap-4 overflow-y-auto overflow-x-hidden scroll-smooth rounded-t-lg rounded-b-none bg-transparent">
                             <article
                               className="flex cursor-pointer items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3"
                               onClick={() => {
@@ -1121,23 +2100,26 @@ export function WorkOrdersDetailsPage() {
                                     className="h-full w-full object-cover"
                                   />
                                 </span>
-                                <p className="min-w-0 text-black">{assignedMasterFullName}</p>
+                                <p className={`min-w-0 text-black transition-opacity duration-150 ${identityVisibilityClass}`}>{displayMasterFullName || " "}</p>
                               </div>
                               <button
                                 type="button"
-                                className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-[22px] font-semibold text-[#7D7D7D]"
+                                className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-[100px] bg-[#EC1C24] text-white"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setMasterActionsModalOpen(true);
                                 }}
+                                aria-label="Действия с ответственным мастером"
                               >
-                                ...
+                                <MoreDotsCircleMenuIcon />
                               </button>
                             </article>
 
-                            <div className="mt-[28px] min-h-0 min-w-0 flex-1 rounded-[12px] bg-white">
+                            <div className="mt-[28px] min-h-0 min-w-0 flex-1 rounded-t-[12px] rounded-b-none bg-white">
                               <div className="flex items-center">
-                                <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Работы</h3>
+                                <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
+                                  Работы <span className="text-[#888888]">({totalWorksCount})</span>
+                                </h3>
                                 <div className="ml-auto flex flex-wrap items-center pl-1">
                                   <div className="flex items-center gap-6">
                                     <button
@@ -1164,19 +2146,37 @@ export function WorkOrdersDetailsPage() {
                                     >
                                       <ClientsStyleCheckboxBox checked={worksScope === "completed"} />
                                       <span>Завершенные</span>
-                                      <span className="tabular-nums text-[#7D7D7D]">({workOrderCompletedWorks.length})</span>
+                                      <span className="tabular-nums text-[#7D7D7D]">({completedWorksData.length})</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setHighlightedWorkId(null);
+                                        window.sessionStorage.removeItem("workFocusId");
+                                        setWorksScope("archived");
+                                      }}
+                                      className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                    >
+                                      <ClientsStyleCheckboxBox checked={worksScope === "archived"} />
+                                      <span>Архив</span>
+                                      <span className="tabular-nums text-[#7D7D7D]">({archivedWorksData.length})</span>
                                     </button>
                                   </div>
                                   <button
                                     type="button"
-                                    onClick={() => setAddWorkModalOpen(true)}
+                                    onClick={() => {
+                                      setAddWorkEditWorksTarget(null);
+                                      setAddWorkEditPartsTarget(null);
+                                      setAddCatalogTarget("works");
+                                      setAddWorkModalOpen(true);
+                                    }}
                                     className="ml-[60px] shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
                                   >
                                     Добавить работу
                                   </button>
                                 </div>
                               </div>
-                              <div className="hide-scrollbar mt-3 min-h-0 min-w-0 max-h-[405px] overflow-y-scroll overflow-x-hidden scroll-smooth rounded-lg bg-transparent">
+                              <div className="hide-scrollbar mt-3 min-h-0 min-w-0 max-h-[405px] overflow-y-scroll overflow-x-hidden scroll-smooth rounded-t-lg rounded-b-none bg-transparent">
                                 <table className="w-full table-fixed border-separate border-spacing-0 whitespace-nowrap text-[16px] font-medium tracking-[-0.02em]">
                                   <colgroup>
                                     <col className="w-[35%]" />
@@ -1187,53 +2187,227 @@ export function WorkOrdersDetailsPage() {
                                   </colgroup>
                                   <thead className="sticky top-0 z-10 bg-[#F3F3F5] text-left text-[16px] font-medium tracking-[-0.02em] text-[#7D7D7D]">
                                     <tr className="h-[45px]">
-                                      <th className="h-[45px] rounded-l-[5px] px-3 align-middle font-medium">Название работы</th>
+                                      <th className="h-[45px] rounded-tl-[5px] px-3 align-middle font-medium">Название работы</th>
                                       <th className="h-[45px] px-3 align-middle font-medium">Статус</th>
                                       <th className="h-[45px] px-3 align-middle font-medium">Сумма</th>
                                       <th className="h-[45px] px-3 align-middle font-medium">Дата добавления</th>
-                                      <th className="h-[45px] rounded-r-[5px] px-3 text-center align-middle font-medium">⋮</th>
+                                      <th className="h-[45px] rounded-tr-[5px] px-3 text-center align-middle font-medium">⋮</th>
                                     </tr>
                                   </thead>
                                   <tbody>
-                                    {filteredWorks.map(
-                                      (row, index) => {
-                                        const { title, statusLabel, amount, kind, addedDate, rowWorkId } = row;
-                                        const dotClass =
-                                          kind === "closed"
-                                            ? "bg-[#00B515]"
-                                            : kind === "new"
-                                              ? "bg-[#ACACAC]"
-                                            : kind === "progress"
-                                              ? "bg-[#2E78C9]"
-                                              : "bg-[#FFB020]";
-                                        return (
-                                          <tr
-                                            key={`${worksScope}-${title}-${index}`}
-                                            className={`h-[45px] transition hover:bg-[rgba(224,9,25,0.10)] ${index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"}`}
-                                            style={highlightedWorkId === rowWorkId ? { animation: "workRowHighlightBorder 4s ease-out" } : undefined}
-                                          >
-                                            <td className="h-[45px] truncate px-3 align-middle text-black">{title}</td>
-                                            <td className="h-[45px] px-3 align-middle">
-                                              <span className="inline-flex items-center gap-2 font-medium text-black">
-                                                <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${dotClass}`} />
-                                                <span className="font-medium text-black">{statusLabel}</span>
-                                              </span>
-                                            </td>
-                                            <td className="h-[45px] px-3 align-middle text-black">{amount}</td>
-                                            <td className="h-[45px] px-3 align-middle text-black">{addedDate}</td>
-                                            <td className="h-[45px] px-3 text-center align-middle">
-                                              <button
-                                                type="button"
-                                                className="cursor-pointer rounded-md px-1.5 py-0.5 text-[16px] font-bold leading-none tracking-[-0.04em] text-[#A0A0A0] transition-colors hover:bg-black/[0.04] hover:text-[#EC1C24]"
-                                                aria-label="Действия"
-                                                onClick={() => setWorkActionsModal({ title, workId: rowWorkId, scope: worksScope, statusLabel })}
+                                    {worksScope === "archived" && archivedWorksData.length === 0 ? (
+                                      <tr>
+                                        <td
+                                          colSpan={5}
+                                          className="bg-white px-3 py-10 align-middle text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]"
+                                        >
+                                          В архиве пока нет работ
+                                        </td>
+                                      </tr>
+                                    ) : filteredWorks.length === 0 && workSearchQuery.trim() ? (
+                                      <tr>
+                                        <td
+                                          colSpan={5}
+                                          className="bg-white px-3 py-10 align-middle text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]"
+                                        >
+                                          Ничего не найдено
+                                        </td>
+                                      </tr>
+                                    ) : (
+                                      filteredWorks.map(
+                                        (row, index) => {
+                                          const { title, statusLabel, amount, kind, addedDate, rowWorkId } = row;
+                                          const dotColor =
+                                            workStatusColorMap[statusLabel] ??
+                                            (kind === "closed"
+                                              ? "#00B515"
+                                              : kind === "new"
+                                                ? "#ACACAC"
+                                              : kind === "progress"
+                                                ? "#2E78C9"
+                                                : "#FFB020");
+                                          const isArchiving = archivingWorkRowId === rowWorkId;
+                                          return (
+                                            <tr
+                                              key={`${worksScope}-${title}-${index}`}
+                                              className={`h-[45px] transition hover:bg-[rgba(224,9,25,0.10)] ${index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"} ${
+                                                isArchiving ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]" : ""
+                                              }`}
+                                              style={
+                                                highlightedWorkId === rowWorkId && !isArchiving
+                                                  ? { animation: "workRowHighlightBorder 4s ease-out" }
+                                                  : undefined
+                                              }
+                                              onAnimationEnd={(e) => onHighlightBorderAnimationEnd(e, rowWorkId)}
+                                            >
+                                              <td className="h-[45px] truncate px-3 align-middle text-black">{title}</td>
+                                              <td className="h-[45px] px-3 align-middle">
+                                                <span className="inline-flex items-center gap-2 font-medium text-black">
+                                                  <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: dotColor }} />
+                                                  <span className="font-medium text-black">{statusLabel}</span>
+                                                </span>
+                                              </td>
+                                              <td className="h-[45px] px-3 align-middle text-black">{amount}</td>
+                                              <td className="h-[45px] px-3 align-middle text-black">{addedDate}</td>
+                                              <td className="h-[45px] px-3 text-center align-middle">
+                                                <button
+                                                  type="button"
+                                                  className="cursor-pointer rounded-md px-1.5 py-0.5 text-[16px] font-bold leading-none tracking-[-0.04em] text-[#A0A0A0] transition-colors hover:bg-black/[0.04] hover:text-[#EC1C24]"
+                                                  aria-label="Действия"
+                                                  onClick={() => setWorkActionsModal({ title, workId: rowWorkId, scope: worksScope, statusLabel })}
+                                                >
+                                                  ...
+                                                </button>
+                                              </td>
+                                            </tr>
+                                          );
+                                        },
+                                      )
+                                    )}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </div>
+                          </div>
+                        </article>
+                    ) : activeCarPanel === "parts" ? (
+                        <article className="relative order-2 mt-[50px] flex min-h-0 flex-1 flex-col rounded-t-[12px] rounded-b-none bg-transparent">
+                          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-lg rounded-b-none bg-transparent">
+                            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-[12px] rounded-b-none bg-white">
+                              <div className="flex shrink-0 items-center">
+                                <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
+                                  Запчасти{" "}
+                                  <span className="text-[#888888]">
+                                    ({partsCurrentData.length + partsArchivedData.length})
+                                  </span>
+                                </h3>
+                                <div className="ml-auto flex flex-wrap items-center pl-1">
+                                  <div className="flex items-center gap-6">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setHighlightedWorkId(null);
+                                        window.sessionStorage.removeItem("workFocusId");
+                                        setPartsScope("current");
+                                      }}
+                                      className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                    >
+                                      <ClientsStyleCheckboxBox checked={partsScope === "current"} />
+                                      <span>Текущие</span>
+                                      <span className="tabular-nums text-[#7D7D7D]">({partsCurrentData.length})</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setHighlightedWorkId(null);
+                                        window.sessionStorage.removeItem("workFocusId");
+                                        setPartsScope("archived");
+                                      }}
+                                      className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                    >
+                                      <ClientsStyleCheckboxBox checked={partsScope === "archived"} />
+                                      <span>Архив</span>
+                                      <span className="tabular-nums text-[#7D7D7D]">({partsArchivedData.length})</span>
+                                    </button>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setAddWorkEditWorksTarget(null);
+                                      setAddWorkEditPartsTarget(null);
+                                      setAddCatalogTarget("parts");
+                                      setAddWorkModalOpen(true);
+                                    }}
+                                    className="ml-[50px] shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
+                                  >
+                                    Добавить запчасть
+                                  </button>
+                                </div>
+                              </div>
+                              <div className="hide-scrollbar mt-3 flex max-h-[585px] min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-auto scroll-smooth rounded-t-lg rounded-b-none bg-transparent">
+                                <table className="w-full table-fixed border-separate border-spacing-0 whitespace-nowrap text-[16px] font-medium tracking-[-0.02em]">
+                                  <colgroup>
+                                    <col className="w-[30%]" />
+                                    <col className="w-[18%]" />
+                                    <col className="w-[18%]" />
+                                    <col className="w-[20%]" />
+                                    <col className="w-[6%]" />
+                                  </colgroup>
+                                  <thead className="sticky top-0 z-10 bg-[#F3F3F5] text-left text-[16px] font-medium tracking-[-0.02em] text-[#7D7D7D]">
+                                    <tr className="h-[45px]">
+                                      <th className="h-[45px] rounded-tl-[5px] px-3 align-middle font-medium">Название запчасти</th>
+                                      <th className="h-[45px] px-3 align-middle font-medium">Кол-во</th>
+                                      <th className="h-[45px] px-3 align-middle font-medium">Цена</th>
+                                      <th className="h-[45px] px-3 align-middle font-medium">Дата добавления</th>
+                                      <th className="h-[45px] rounded-tr-[5px] px-3 text-center align-middle font-medium">⋮</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {partsScope === "archived" && partsArchivedData.length === 0 ? (
+                                      <tr>
+                                        <td
+                                          colSpan={5}
+                                          className="bg-white px-3 py-10 align-middle text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]"
+                                        >
+                                          В архиве пока нет запчастей
+                                        </td>
+                                      </tr>
+                                    ) : (
+                                      (() => {
+                                        const rows = filteredPartsRows;
+                                        if (rows.length === 0) {
+                                          return (
+                                            <tr>
+                                              <td
+                                                colSpan={5}
+                                                className="bg-white px-3 py-10 align-middle text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]"
                                               >
-                                                ...
-                                              </button>
-                                            </td>
-                                          </tr>
-                                        );
-                                      },
+                                                Ничего не найдено
+                                              </td>
+                                            </tr>
+                                          );
+                                        }
+                                        return rows.map((row, index) => {
+                                          const [title, quantity, price, addedDate, partRowId] = row;
+                                          const isArchiving = archivingWorkRowId === partRowId;
+                                          return (
+                                            <tr
+                                              key={`parts-${partRowId}`}
+                                              className={`h-[45px] transition hover:bg-[rgba(224,9,25,0.10)] ${index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"} ${
+                                                isArchiving ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]" : ""
+                                              }`}
+                                              style={
+                                                highlightedWorkId === partRowId && !isArchiving
+                                                  ? { animation: "workRowHighlightBorder 4s ease-out" }
+                                                  : undefined
+                                              }
+                                              onAnimationEnd={(e) => onHighlightBorderAnimationEnd(e, partRowId)}
+                                            >
+                                              <td className="h-[45px] truncate px-3 align-middle text-black">{title}</td>
+                                              <td className="h-[45px] px-3 align-middle text-black">{quantity}</td>
+                                              <td className="h-[45px] px-3 align-middle text-black">{price}</td>
+                                              <td className="h-[45px] px-3 align-middle text-black">{addedDate}</td>
+                                              <td className="h-[45px] px-3 text-center align-middle">
+                                                <button
+                                                  type="button"
+                                                  className="cursor-pointer rounded-md px-1.5 py-0.5 text-[16px] font-bold leading-none tracking-[-0.04em] text-[#A0A0A0] transition-colors hover:bg-black/[0.04] hover:text-[#EC1C24]"
+                                                  aria-label="Действия"
+                                                  onClick={() =>
+                                                    setWorkActionsModal({
+                                                      title,
+                                                      workId: partRowId,
+                                                      scope: partsScope === "archived" ? "partsArchived" : "parts",
+                                                      statusLabel: workStatusById[partRowId]?.label ?? "Новый",
+                                                    })
+                                                  }
+                                                >
+                                                  ...
+                                                </button>
+                                              </td>
+                                            </tr>
+                                          );
+                                        });
+                                      })()
                                     )}
                                   </tbody>
                                 </table>
@@ -1244,10 +2418,11 @@ export function WorkOrdersDetailsPage() {
                     ) : activeCarPanel === "finance" ? (
                         <article className="relative mt-[107px] min-h-0 flex-1 rounded-[12px] bg-transparent tracking-[-0.04em]">
                           <div className="absolute left-0 right-0 top-0 -translate-y-full pb-3">
-                            <div className="flex w-full items-center justify-between">
+                            <div className="flex w-full flex-wrap items-center justify-between gap-3">
                               <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Финансовая сводка</h3>
                               <button
                                 type="button"
+                                onClick={() => void exportFinanceSummaryPdf()}
                                 className="shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
                               >
                                 Экспорт в PDF
@@ -1295,20 +2470,9 @@ export function WorkOrdersDetailsPage() {
                                   <span className="text-[18px] font-semibold text-[#111826]">Итого к оплате</span>
                                   <span className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">{formatCurrency(totalToPay)}</span>
                                 </div>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[#6F7785]">Оплачено</span>
-                                  <span className="font-medium text-[#00B515]">{formatCurrency(paidAmount)}</span>
-                                </div>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[#6F7785]">К доплате</span>
-                                  <span className="font-medium text-[#EC1C24]">{formatCurrency(dueAmount)}</span>
-                                </div>
                               </div>
                             </div>
-                            <button
-                              type="button"
-                              className="flex h-[46px] w-full items-center justify-center gap-2 rounded-[8px] border border-[#D8DDE6] bg-white text-[16px] font-semibold text-[#EC1C24]"
-                            >
+                            <button type="button" onClick={printFinanceReceipt} className="flex h-[46px] w-full items-center justify-center gap-2 rounded-[8px] border border-[#D8DDE6] bg-white text-[16px] font-semibold text-[#EC1C24]">
                               <svg viewBox="0 0 24 24" fill="none" className="h-[18px] w-[18px]">
                                 <path d="M12 5V19" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                                 <path d="M5 12H19" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -1324,11 +2488,11 @@ export function WorkOrdersDetailsPage() {
                               <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Фото автомобиля</h3>
                             </div>
                           </div>
-                          <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto scroll-smooth pr-1">
+                          <div className="hide-scrollbar min-h-0 flex-1 overflow-y-auto scroll-smooth">
                             <div className="grid grid-cols-3 gap-3">
                               {carPhotos.map((photoSrc, index) => (
                                 <article
-                                  key={index}
+                                  key={photoSrc}
                                   onClick={() => setSelectedPhotoIndex(index)}
                                   className={`group relative aspect-[4/3] w-full cursor-pointer overflow-hidden rounded-[10px] bg-[#F3F3F5] transition-all duration-300 ease-out hover:-translate-y-0.5 hover:shadow-[0_10px_28px_-12px_rgba(17,24,38,0.45)] ${
                                     newlyAddedPhoto === photoSrc
@@ -1339,6 +2503,26 @@ export function WorkOrdersDetailsPage() {
                                   <img src={photoSrc} alt="BMW M5 F90 Competition" className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-[1.03]" />
                                   <span className="pointer-events-none absolute inset-0 rounded-[10px] ring-2 ring-transparent transition-all duration-300 group-hover:ring-[#EC1C24]/55" />
                                   <span className="pointer-events-none absolute inset-0 bg-[#111826]/0 transition-colors duration-300 group-hover:bg-[#111826]/10" />
+                                  <button
+                                    type="button"
+                                    className="absolute right-2 top-2 z-10 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full bg-black/50 text-white opacity-0 shadow-md transition-opacity hover:bg-black/65 group-hover:opacity-100"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      removeCarPhotoAtIndex(index);
+                                    }}
+                                    aria-label="Удалить фото"
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" className="h-[18px] w-[18px]" aria-hidden>
+                                      <path
+                                        d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m2 0v12a2 2 0 01-2 2H9a2 2 0 01-2-2V7"
+                                        stroke="currentColor"
+                                        strokeWidth="1.75"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      />
+                                      <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                                    </svg>
+                                  </button>
                                 </article>
                               ))}
                             </div>
@@ -1413,8 +2597,8 @@ export function WorkOrdersDetailsPage() {
                           <div className="flex items-start justify-between gap-4">
                             <div>
                               <h1 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
-                                <span className="block whitespace-nowrap">{assignedMasterFirstLine}</span>
-                                <span className="block">{assignedMasterSecondLine || "\u00A0"}</span>
+                                <span className="block whitespace-nowrap">{displayMasterFirstLine || " "}</span>
+                                <span className="block">{displayMasterSecondLine || " "}</span>
                               </h1>
                             </div>
                             <img src={assignedMasterPhotoLarge} alt={`Фото профиля: ${assignedMasterFullName}`} className="h-[72px] w-[72px] rounded-full object-cover" />
@@ -1459,7 +2643,6 @@ export function WorkOrdersDetailsPage() {
                             {[
                               { id: "active" as const, label: "Активные" },
                               { id: "recentlyDone" as const, label: "Недавно завершенные" },
-                              { id: "delayed" as const, label: "Просроченные / Задержанные" },
                             ].map((tab) => (
                               <button
                                 key={tab.id}
@@ -1502,7 +2685,7 @@ export function WorkOrdersDetailsPage() {
                                 </div>
                               )}
                             </div>
-                          ) : employeeOrdersSection === "recentlyDone" ? (
+                          ) : (
                             <div className="mt-4 space-y-4">
                               {masterCompletedOrderItems.length > 0 ? (
                                 masterCompletedOrderItems.map((item) => {
@@ -1530,37 +2713,6 @@ export function WorkOrdersDetailsPage() {
                               ) : (
                                 <div className="rounded-[12px] bg-[#F3F3F5] px-4 py-3 text-[15px] font-medium tracking-[-0.04em] text-[#6F7785]">
                                   Недавно завершенных заказ-нарядов нет.
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="mt-4 space-y-4">
-                              {masterDelayedOrderItems.length > 0 ? (
-                                masterDelayedOrderItems.map((item) => {
-                                  const [titlePart, ...restParts] = item.text.split(" · ");
-                                  const detailsPart = restParts.join(" · ");
-                                  return (
-                                    <article key={item.text} className="flex items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3">
-                                      <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
-                                        <img src={item.icon} alt="" className="h-5 w-5" />
-                                      </span>
-                                      <p className="text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">
-                                        <span className="text-[#111826]">{titlePart}</span>
-                                        {detailsPart ? ` · ${detailsPart}` : ""}
-                                      </p>
-                                      <button
-                                        type="button"
-                                        onClick={() => navigateToWorkOrderFromCard(item.text)}
-                                        className="ml-auto inline-flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-full bg-[#EC1C24] text-white"
-                                      >
-                                        <img src="/go_to.svg" alt="" className="h-[17px] w-5" />
-                                      </button>
-                                    </article>
-                                  );
-                                })
-                              ) : (
-                                <div className="rounded-[12px] bg-[#F3F3F5] px-4 py-3 text-[15px] font-medium tracking-[-0.04em] text-[#6F7785]">
-                                  У этого мастера нет задержанных заказ-нарядов.
                                 </div>
                               )}
                             </div>
@@ -1629,22 +2781,40 @@ export function WorkOrdersDetailsPage() {
               >
                 <div className="border-b border-[#EEEDF0] p-5">
                   <h2 id="work-actions-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
-                    Действия с работой
+                    {workActionsModal.scope === "parts" || workActionsModal.scope === "partsArchived"
+                      ? "Действия с запчастью"
+                      : "Действия с работой"}
                   </h2>
                   <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
                     {workActionsModal.title}
                   </p>
                 </div>
                 <ul className="p-0">
-                  {[
-                    { label: "Посмотреть запчасти", icon: "parts" as const },
-                    { label: "Изменить статус", icon: "status" as const },
-                    { label: "Редактировать", icon: "edit" as const },
-                  ].map(({ label, icon }) => (
+                  {(
+                    workActionsModal.scope === "parts" || workActionsModal.scope === "partsArchived"
+                      ? [
+                          { label: "Редактировать", icon: "edit" as const, danger: false },
+                          ...(workActionsModal.scope === "parts"
+                            ? [{ label: "Переместить в архив", icon: "archive" as const, danger: true }]
+                            : [{ label: "Вернуть в таблицу", icon: "restore" as const, danger: false }]),
+                        ]
+                      : [
+                          { label: "Изменить статус", icon: "status" as const, danger: false },
+                          { label: "Редактировать", icon: "edit" as const, danger: false },
+                          ...(workActionsModal.scope === "archived"
+                            ? [{ label: "Вернуть в таблицу", icon: "restore" as const, danger: false }]
+                            : []),
+                          ...(workActionsModal.scope !== "archived"
+                            ? [{ label: "Переместить в архив", icon: "archive" as const, danger: true }]
+                            : []),
+                        ]
+                  ).map(({ label, icon, danger }) => (
                     <li key={label}>
                       <button
                         type="button"
-                        className="flex w-full cursor-pointer items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] text-[#111826] transition-colors hover:bg-[#F3F3F5]"
+                        className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                          danger ? "text-[#EC1C24] hover:bg-[#EC1C24]/10" : "text-[#111826] hover:bg-[#F3F3F5]"
+                        }`}
                         onClick={() => {
                           if (label === "Изменить статус" && workActionsModal) {
                             setWorkStatusPicker({
@@ -1652,11 +2822,294 @@ export function WorkOrdersDetailsPage() {
                               workId: workActionsModal.workId,
                               statusLabel: workActionsModal.statusLabel,
                             });
+                            setWorkActionsModal(null);
+                            return;
+                          }
+                          if (label === "Редактировать" && workActionsModal) {
+                            const snap = workActionsModal;
+                            if (snap.scope === "parts" || snap.scope === "partsArchived") {
+                              const listScope = snap.scope === "parts" ? "current" : "archived";
+                              const row =
+                                listScope === "current"
+                                  ? partsCurrentData.find((r) => r[4] === snap.workId)
+                                  : partsArchivedData.find((r) => r[4] === snap.workId);
+                              if (!row) {
+                                setWorkActionsModal(null);
+                                return;
+                              }
+                              setWorkActionsModal(null);
+                              setAddWorkEditWorksTarget(null);
+                              setAddCatalogTarget("parts");
+                              setAddWorkEditPartsTarget({
+                                partId: snap.workId,
+                                listScope,
+                                originalTitle: row[0],
+                                originalQuantityStr: row[1],
+                              });
+                              setAddWorkModalOpen(true);
+                              return;
+                            }
+                            const listScope = snap.scope;
+                            const row =
+                              listScope === "current"
+                                ? currentWorksData.find((r) => r[5] === snap.workId)
+                                : listScope === "completed"
+                                  ? completedWorksData.find((r) => r[5] === snap.workId)
+                                  : archivedWorksData.find((r) => r[5] === snap.workId);
+                            if (!row) {
+                              setWorkActionsModal(null);
+                              return;
+                            }
+                            setWorkActionsModal(null);
+                            setAddWorkEditPartsTarget(null);
+                            setAddCatalogTarget("works");
+                            setAddWorkEditWorksTarget({
+                              workId: snap.workId,
+                              listScope,
+                              originalTitle: row[0],
+                            });
+                            setAddWorkModalOpen(true);
+                            return;
+                          }
+                          if (label === "Вернуть в таблицу" && workActionsModal) {
+                            const snap = workActionsModal;
+                            if (snap.scope === "partsArchived") {
+                              const moveRow = partsArchivedData.find((row) => row[4] === snap.workId);
+                              if (!moveRow) {
+                                setWorkActionsModal(null);
+                                return;
+                              }
+                              const partId = moveRow[4] ?? snap.workId;
+                              setWorkActionsModal(null);
+                              setArchivingWorkRowId(snap.workId);
+                              window.setTimeout(() => {
+                                setPartsArchivedData((prev) => prev.filter((row) => row[4] !== snap.workId));
+                                setPartsCurrentData((prev) => [moveRow, ...prev]);
+                                setArchivingWorkRowId((current) => (current === snap.workId ? null : current));
+                                emitArchiveStyleToast({
+                                  line1: moveRow[0],
+                                  line2: "возвращена в таблицу",
+                                  navigateTo:
+                                    partId !== ""
+                                      ? `/work-orders/${currentWorkOrderId}?panel=parts&partsScope=current&focusWorkId=${encodeURIComponent(partId)}`
+                                      : undefined,
+                                });
+                              }, 260);
+                              return;
+                            }
+                            if (snap.scope !== "archived") {
+                              setWorkActionsModal(null);
+                              return;
+                            }
+                            const moveRow = archivedWorksData.find((row) => row[5] === snap.workId);
+                            if (!moveRow) {
+                              setWorkActionsModal(null);
+                              return;
+                            }
+                            const workId = moveRow[5] ?? snap.workId;
+                            const [, statusLabel, , kind] = moveRow;
+                            const override = workStatusById[workId];
+                            const effectiveKind = override?.kind ?? kind;
+                            const effectiveStatus = override?.label ?? statusLabel;
+                            const toCompleted =
+                              effectiveKind === "closed" ||
+                              effectiveStatus === "Готово" ||
+                              effectiveStatus === "Закрыт";
+                            setWorkActionsModal(null);
+                            setArchivingWorkRowId(snap.workId);
+                            window.setTimeout(() => {
+                              setArchivedWorksData((prev) => prev.filter((row) => row[5] !== snap.workId));
+                              if (toCompleted) {
+                                setCompletedWorksData((prev) => [moveRow, ...prev]);
+                              } else {
+                                setCurrentWorksData((prev) => [moveRow, ...prev]);
+                              }
+                              setArchivingWorkRowId((current) => (current === snap.workId ? null : current));
+                              emitArchiveStyleToast({
+                                line1: moveRow[0],
+                                line2: "возвращена в таблицу",
+                                navigateTo:
+                                  workId !== ""
+                                    ? `/work-orders/${currentWorkOrderId}?panel=orders&worksScope=${toCompleted ? "completed" : "current"}&focusWorkId=${encodeURIComponent(workId)}`
+                                    : undefined,
+                              });
+                            }, 260);
+                            return;
+                          }
+                          if (label === "Переместить в архив" && workActionsModal) {
+                            const snap = workActionsModal;
+                            if (snap.scope === "parts") {
+                              const moveRow = partsCurrentData.find((row) => row[4] === snap.workId);
+                              if (moveRow) {
+                                setWorkActionsModal(null);
+                                setArchivingWorkRowId(snap.workId);
+                                window.setTimeout(() => {
+                                  setPartsCurrentData((prev) => prev.filter((row) => row[4] !== snap.workId));
+                                  setPartsArchivedData((prev) => [moveRow, ...prev]);
+                                  setArchivingWorkRowId((current) => (current === snap.workId ? null : current));
+                                  emitArchiveStyleToast({
+                                    line1: moveRow[0],
+                                    line2: "перемещена в архив",
+                                    navigateTo:
+                                      moveRow[4] != null && moveRow[4] !== ""
+                                        ? `/work-orders/${currentWorkOrderId}?panel=parts&partsScope=archived&focusWorkId=${encodeURIComponent(moveRow[4])}`
+                                        : undefined,
+                                  });
+                                }, 260);
+                                return;
+                              }
+                              setWorkActionsModal(null);
+                              return;
+                            }
+                            const moveRow =
+                              snap.scope === "current"
+                                ? currentWorksData.find((row) => row[5] === snap.workId)
+                                : snap.scope === "completed"
+                                  ? completedWorksData.find((row) => row[5] === snap.workId)
+                                  : undefined;
+                            if (moveRow && (snap.scope === "current" || snap.scope === "completed")) {
+                              setWorkActionsModal(null);
+                              setArchivingWorkRowId(snap.workId);
+                              window.setTimeout(() => {
+                                if (snap.scope === "current") {
+                                  setCurrentWorksData((prev) => prev.filter((row) => row[5] !== snap.workId));
+                                } else {
+                                  setCompletedWorksData((prev) => prev.filter((row) => row[5] !== snap.workId));
+                                }
+                                setArchivedWorksData((prev) => [moveRow, ...prev]);
+                                setArchivingWorkRowId((current) => (current === snap.workId ? null : current));
+                                const archivedId = moveRow[5];
+                                emitArchiveStyleToast({
+                                  line1: moveRow[0],
+                                  line2: "перемещена в архив",
+                                  navigateTo:
+                                    archivedId != null && archivedId !== ""
+                                      ? `/work-orders/${currentWorkOrderId}?panel=orders&worksScope=archived&focusWorkId=${encodeURIComponent(archivedId)}`
+                                      : undefined,
+                                });
+                              }, 260);
+                              return;
+                            }
+                            setWorkActionsModal(null);
+                            return;
                           }
                           setWorkActionsModal(null);
                         }}
                       >
-                        <WorkActionIcon type={icon} className="text-[#4B5563]" />
+                        <WorkActionIcon type={icon} className={danger ? "text-[#EC1C24]" : "text-[#4B5563]"} />
+                        {label}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {documentActionsModal && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[260] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setDocumentActionsModal(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="document-actions-title"
+                className="w-full max-w-[360px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="document-actions-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Действия с документом
+                  </h2>
+                  <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    {documentActionsModal.title}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  {(
+                    documentActionsModal.scope === "documentsCurrent"
+                      ? [
+                          { label: "Скачать документ", icon: "download" as const, danger: false },
+                          { label: "Переместить в архив", icon: "archive" as const, danger: true },
+                        ]
+                      : [
+                          { label: "Скачать документ", icon: "download" as const, danger: false },
+                          { label: "Вернуть в таблицу", icon: "restore" as const, danger: false },
+                        ]
+                  ).map(({ label, icon, danger }) => (
+                    <li key={label}>
+                      <button
+                        type="button"
+                        className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                          danger ? "text-[#EC1C24] hover:bg-[#EC1C24]/10" : "text-[#111826] hover:bg-[#F3F3F5]"
+                        }`}
+                        onClick={() => {
+                          const snap = documentActionsModal;
+                          if (!snap) return;
+                          if (label === "Скачать документ") {
+                            const doc =
+                              carDocumentsCurrent.find((d) => d.id === snap.docId) ??
+                              carDocumentsArchived.find((d) => d.id === snap.docId);
+                            if (doc) downloadCarDocument(doc);
+                            setDocumentActionsModal(null);
+                            return;
+                          }
+                          if (label === "Переместить в архив" && snap.scope === "documentsCurrent") {
+                            const moveDoc = carDocumentsCurrent.find((d) => d.id === snap.docId);
+                            if (!moveDoc) {
+                              setDocumentActionsModal(null);
+                              return;
+                            }
+                            const docId = moveDoc.id;
+                            setDocumentActionsModal(null);
+                            setArchivingDocRowId(snap.docId);
+                            window.setTimeout(() => {
+                              setCarDocumentsCurrent((prev) => prev.filter((d) => d.id !== snap.docId));
+                              setCarDocumentsArchived((prev) => [moveDoc, ...prev]);
+                              setArchivingDocRowId((current) => (current === snap.docId ? null : current));
+                              emitArchiveStyleToast({
+                                line1: moveDoc.name,
+                                line2: "перемещён в архив",
+                                navigateTo:
+                                  docId !== ""
+                                    ? `/work-orders/${currentWorkOrderId}?panel=documents&documentsScope=archived&focusWorkId=${encodeURIComponent(docId)}`
+                                    : undefined,
+                              });
+                            }, 260);
+                            return;
+                          }
+                          if (label === "Вернуть в таблицу" && snap.scope === "documentsArchived") {
+                            const moveDoc = carDocumentsArchived.find((d) => d.id === snap.docId);
+                            if (!moveDoc) {
+                              setDocumentActionsModal(null);
+                              return;
+                            }
+                            const docId = moveDoc.id;
+                            setDocumentActionsModal(null);
+                            setArchivingDocRowId(snap.docId);
+                            window.setTimeout(() => {
+                              setCarDocumentsArchived((prev) => prev.filter((d) => d.id !== snap.docId));
+                              setCarDocumentsCurrent((prev) => [moveDoc, ...prev]);
+                              setArchivingDocRowId((current) => (current === snap.docId ? null : current));
+                              emitArchiveStyleToast({
+                                line1: moveDoc.name,
+                                line2: "возвращён в таблицу",
+                                navigateTo:
+                                  docId !== ""
+                                    ? `/work-orders/${currentWorkOrderId}?panel=documents&documentsScope=current&focusWorkId=${encodeURIComponent(docId)}`
+                                    : undefined,
+                              });
+                            }, 260);
+                            return;
+                          }
+                          setDocumentActionsModal(null);
+                        }}
+                      >
+                        <WorkActionIcon type={icon} className={danger ? "text-[#EC1C24]" : "text-[#4B5563]"} />
                         {label}
                       </button>
                     </li>
@@ -1692,10 +3145,7 @@ export function WorkOrdersDetailsPage() {
                 <ul className="p-0">
                   {WORK_STATUS_OPTIONS.map((status) => {
                     const currentStatusLabel = workStatusById[workStatusPicker.workId]?.label ?? workStatusPicker.statusLabel;
-                    const selected =
-                      status.label === "Новая"
-                        ? currentStatusLabel === "Новая" || currentStatusLabel === "Новый"
-                        : currentStatusLabel === status.label;
+                    const selected = currentStatusLabel === status.label;
                     return (
                       <li key={status.label}>
                         <button
@@ -1704,6 +3154,7 @@ export function WorkOrdersDetailsPage() {
                             selected ? "bg-[#F8F8FA] text-[#111826]" : "text-[#111826] hover:bg-[#F3F3F5]"
                           }`}
                           onClick={() => {
+                            applyStatusToWorkLists(workStatusPicker.workId, status.label, status.kind);
                             setWorkStatusById((prev) => ({
                               ...prev,
                               [workStatusPicker.workId]: { label: status.label, kind: status.kind },
@@ -1752,7 +3203,7 @@ export function WorkOrdersDetailsPage() {
                     Действия с мастером
                   </h2>
                   <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
-                    {assignedMasterFullName}
+                    {displayMasterFullName || " "}
                   </p>
                 </div>
                 <ul className="p-0">
@@ -1827,15 +3278,15 @@ export function WorkOrdersDetailsPage() {
                     Выберите мастера для назначения
                   </p>
                 </div>
-                <ul className="max-h-[420px] overflow-y-auto p-2">
+                <ul className="max-h-[420px] space-y-2 overflow-y-auto p-2">
                   {availableMasters.map((masterName) => (
                     <li key={masterName}>
                       <button
                         type="button"
-                        className={`flex w-full cursor-pointer items-center rounded-[10px] px-4 py-3 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                        className={`flex min-h-[56px] w-full cursor-pointer items-center rounded-[10px] px-3 py-3 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
                           switchMasterSelection === masterName
                             ? "bg-[#EC1C24] text-white"
-                            : "text-[#111826] hover:bg-[#F3F3F5]"
+                            : "bg-[#F3F3F5] text-[#111826] hover:bg-[#EBECF0]"
                         }`}
                         onClick={() => setSwitchMasterSelection(masterName)}
                       >
@@ -1855,30 +3306,45 @@ export function WorkOrdersDetailsPage() {
                   <button
                     type="button"
                     onClick={() => setSwitchMasterModalOpen(false)}
-                    className="h-11 rounded-[10px] bg-[#ECECEF] px-4 text-[15px] font-medium text-black"
+                    className="h-11 rounded-[10px] bg-[#ECECEF] px-4 text-[15px] font-medium tracking-[-0.04em] text-black"
                   >
                     Отмена
                   </button>
                   <button
                     type="button"
                     disabled={!switchMasterSelection}
-                    onClick={() => {
+                    onClick={async () => {
                       if (!switchMasterSelection) return;
-                      setAssignedMasterName(switchMasterSelection);
-                      setSwitchMasterModalOpen(false);
-                      const raw = window.localStorage.getItem(workOrderMasterOverrideStorageKey);
-                      let parsed: Record<string, string> = {};
-                      if (raw) {
-                        try {
-                          parsed = JSON.parse(raw) as Record<string, string>;
-                        } catch {
-                          parsed = {};
+                      const nextMaster = switchMasterSelection;
+                      const nextMasterPhoto = masterPhotoByName[nextMaster] ?? null;
+                      try {
+                        await updateWorkOrdersStorageRows([currentWorkOrderId], { master: nextMaster, master_photo: nextMasterPhoto });
+                        setAssignedMasterName(nextMaster);
+                        setOrderMeta((prev) => ({ ...prev, master: nextMaster }));
+                        setAllWorkOrdersMeta((prev) =>
+                          prev.map((row) => (row.id === currentWorkOrderId ? { ...row, master: nextMaster } : row)),
+                        );
+                        const raw = window.localStorage.getItem(workOrderMasterOverrideStorageKey);
+                        let parsed: Record<string, string> = {};
+                        if (raw) {
+                          try {
+                            parsed = JSON.parse(raw) as Record<string, string>;
+                          } catch {
+                            parsed = {};
+                          }
                         }
+                        parsed[currentWorkOrderId] = nextMaster;
+                        window.localStorage.setItem(workOrderMasterOverrideStorageKey, JSON.stringify(parsed));
+                        setSwitchMasterModalOpen(false);
+                      } catch (error) {
+                        console.warn("Failed to update work-order master.", error);
+                        emitArchiveStyleToast({
+                          line1: "Не удалось сменить мастера",
+                          line2: "Проверьте подключение к серверу и повторите",
+                        });
                       }
-                      parsed[CURRENT_WORK_ORDER_ID] = switchMasterSelection;
-                      window.localStorage.setItem(workOrderMasterOverrideStorageKey, JSON.stringify(parsed));
                     }}
-                    className="h-11 rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className="h-11 rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium tracking-[-0.04em] text-white disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     Назначить
                   </button>
@@ -1925,20 +3391,44 @@ export function WorkOrdersDetailsPage() {
                     className="flex h-full w-[min(900px,58vw)] min-w-[380px] max-w-[min(1040px,calc(100vw-48px))] flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)]"
                   >
                     <div className="border-b border-[#EEEDF0] px-6 py-5">
-                      <h2 id="add-work-title" className="text-[32px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Добавить работу</h2>
+                      <h2 id="add-work-title" className="text-[32px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">
+                        {addCatalogTarget === "parts"
+                          ? addWorkEditPartsTarget
+                            ? "Редактировать запчасть"
+                            : "Добавить запчасть"
+                          : addWorkEditWorksTarget
+                            ? "Редактировать работу"
+                            : "Добавить работу"}
+                      </h2>
+                      {addCatalogTarget === "works" && addWorkEditWorksTarget ? (
+                        <p className="mt-2 text-[15px] font-medium leading-[1.35] tracking-[-0.03em] text-[#6F7785]">
+                          Сейчас в заказ-наряде:{" "}
+                          <span className="text-[#111826]">{addWorkEditWorksTarget.originalTitle}</span>
+                        </p>
+                      ) : null}
+                      {addCatalogTarget === "parts" && addWorkEditPartsTarget ? (
+                        <p className="mt-2 text-[15px] font-medium leading-[1.35] tracking-[-0.03em] text-[#6F7785]">
+                          Сейчас в заказ-наряде:{" "}
+                          <span className="text-[#111826]">{addWorkEditPartsTarget.originalTitle}</span>
+                          <span className="text-[#7D7D7D]">
+                            {" "}
+                            · кол-во: <span className="text-[#111826]">{addWorkEditPartsTarget.originalQuantityStr}</span>
+                          </span>
+                        </p>
+                      ) : null}
                     </div>
                     <div className="hide-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5 scroll-smooth">
                       <div>
                         <input
                           value={addWorkSearchQuery}
                           onChange={(e) => setAddWorkSearchQuery(e.target.value)}
-                          placeholder="Поиск работы из справочника..."
+                          placeholder={addCatalogTarget === "parts" ? "Поиск запчасти из справочника..." : "Поиск работы из справочника..."}
                           className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[16px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5]"
                         />
                       </div>
                       <div>
                         <div className="mb-5 flex flex-wrap gap-2 pb-1">
-                          {workCatalogSections.map((section) => (
+                          {(addCatalogTarget === "parts" ? partsCatalogSections : workCatalogSections).map((section) => (
                             <button
                               key={section.label}
                               type="button"
@@ -1959,6 +3449,13 @@ export function WorkOrdersDetailsPage() {
                             <button
                               key={item.title}
                               type="button"
+                              ref={
+                                selectedWorkCatalogItem?.title === item.title &&
+                                ((addCatalogTarget === "works" && addWorkEditWorksTarget) ||
+                                  (addCatalogTarget === "parts" && addWorkEditPartsTarget))
+                                  ? addWorkCatalogSelectedBtnRef
+                                  : undefined
+                              }
                               onClick={() => setSelectedWorkCatalogItem(item)}
                               className={`flex min-h-[56px] w-full cursor-pointer items-center justify-between rounded-[10px] px-3 py-3 text-left text-[15px] font-medium transition-colors ${
                                 selectedWorkCatalogItem?.title === item.title
@@ -1976,6 +3473,23 @@ export function WorkOrdersDetailsPage() {
                             </div>
                           ) : null}
                         </div>
+                        {addCatalogTarget === "parts" ? (
+                          <div className="mt-5 space-y-2">
+                            <label htmlFor="add-part-quantity" className="block text-[14px] font-medium tracking-[-0.02em] text-[#6F7785]">
+                              Количество
+                            </label>
+                            <input
+                              id="add-part-quantity"
+                              type="text"
+                              inputMode="decimal"
+                              value={addPartQuantityInput}
+                              onChange={(e) => setAddPartQuantityInput(e.target.value)}
+                              placeholder="Например, 1 или 1.5"
+                              autoComplete="off"
+                              className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[16px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     </div>
                     <div className="flex items-center justify-between border-t border-[#EEEDF0] px-6 py-4">
@@ -1988,39 +3502,133 @@ export function WorkOrdersDetailsPage() {
                       </button>
                       <button
                         type="button"
-                        disabled={!selectedWorkCatalogItem}
+                        disabled={
+                          !selectedWorkCatalogItem ||
+                          (addCatalogTarget === "parts" && parsePartQuantityInput(addPartQuantityInput) === null)
+                        }
                         onClick={() => {
                           if (!selectedWorkCatalogItem) return;
+                          const partQty = addCatalogTarget === "parts" ? parsePartQuantityInput(addPartQuantityInput) : null;
+                          if (addCatalogTarget === "parts" && partQty === null) return;
+                          if (addCatalogTarget === "parts" && addWorkEditPartsTarget) {
+                            const { partId, listScope } = addWorkEditPartsTarget;
+                            const title = selectedWorkCatalogItem.title;
+                            const qtyCell = formatPartQuantityCell(partQty!);
+                            const priceCell = formatPartLineTotalRub(selectedWorkCatalogItem.price, partQty!);
+                            const apply = (prev: PartRow[]) =>
+                              prev.map((row) => {
+                                if (row[4] !== partId) return row;
+                                return [title, qtyCell, priceCell, row[3], partId] as PartRow;
+                              });
+                            if (listScope === "current") setPartsCurrentData(apply);
+                            else setPartsArchivedData(apply);
+                            setHighlightedWorkId(null);
+                            window.sessionStorage.removeItem("workFocusId");
+                            setPartsScope(listScope);
+                            setActiveCarPanel("parts");
+                            setAddWorkModalOpen(false);
+                            const partsScopeParam = listScope === "archived" ? "archived" : "current";
+                            window.setTimeout(() => {
+                              emitArchiveStyleToast({
+                                line1: title,
+                                line2: "обновлена в списке запчастей",
+                                navigateTo:
+                                  partId !== ""
+                                    ? `/work-orders/${currentWorkOrderId}?panel=parts&partsScope=${partsScopeParam}&focusWorkId=${encodeURIComponent(partId)}`
+                                    : undefined,
+                              });
+                            }, 60);
+                            return;
+                          }
+                          if (addCatalogTarget === "works" && addWorkEditWorksTarget) {
+                            const { workId, listScope } = addWorkEditWorksTarget;
+                            const title = selectedWorkCatalogItem.title;
+                            const amountStr = formatWorkPrice(getCatalogWorkPrice(title));
+                            const updateList = (prev: WorkRow[]) =>
+                              prev.map((row) => {
+                                if (row[5] !== workId) return row;
+                                const [, statusLabel, , kind, addedDate] = row;
+                                return [title, statusLabel, amountStr, kind, addedDate, workId] as WorkRow;
+                              });
+                            if (listScope === "current") setCurrentWorksData(updateList);
+                            else if (listScope === "completed") setCompletedWorksData(updateList);
+                            else setArchivedWorksData(updateList);
+                            setHighlightedWorkId(null);
+                            window.sessionStorage.removeItem("workFocusId");
+                            setWorksScope(listScope);
+                            setActiveCarPanel("orders");
+                            setAddWorkModalOpen(false);
+                            const worksScopeParam =
+                              listScope === "archived" ? "archived" : listScope === "completed" ? "completed" : "current";
+                            window.setTimeout(() => {
+                              emitArchiveStyleToast({
+                                line1: title,
+                                line2: "обновлена в списке работ",
+                                navigateTo:
+                                  workId !== ""
+                                    ? `/work-orders/${currentWorkOrderId}?panel=orders&worksScope=${worksScopeParam}&focusWorkId=${encodeURIComponent(workId)}`
+                                    : undefined,
+                              });
+                            }, 60);
+                            return;
+                          }
                           const newWorkId =
                             typeof crypto !== "undefined" && "randomUUID" in crypto
                               ? crypto.randomUUID()
                               : `work-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-                          setExtraCurrentWorks((prev) => [
-                            [
-                              selectedWorkCatalogItem.title,
-                              "Новый",
-                              `${selectedWorkCatalogItem.price.toLocaleString("ru-RU")} ₽`,
-                              "new",
-                              "07.05.2026",
-                              newWorkId,
-                            ],
-                            ...prev,
-                          ]);
+                          if (addCatalogTarget === "parts") {
+                            setPartsCurrentData((prev) => [
+                              [
+                                selectedWorkCatalogItem.title,
+                                formatPartQuantityCell(partQty!),
+                                formatPartLineTotalRub(selectedWorkCatalogItem.price, partQty!),
+                                "07.05.2026",
+                                newWorkId,
+                              ],
+                              ...prev,
+                            ]);
+                          } else {
+                            setCurrentWorksData((prev) => [
+                              [
+                                selectedWorkCatalogItem.title,
+                                "Новый",
+                                formatWorkPrice(getCatalogWorkPrice(selectedWorkCatalogItem.title)),
+                                "new",
+                                "07.05.2026",
+                                newWorkId,
+                              ],
+                              ...prev,
+                            ]);
+                          }
                           setHighlightedWorkId(null);
                           window.sessionStorage.removeItem("workFocusId");
-                          setWorksScope("current");
+                          if (addCatalogTarget === "parts") {
+                            setActiveCarPanel("parts");
+                            setPartsScope("current");
+                          } else {
+                            setWorksScope("current");
+                          }
                           setAddWorkModalOpen(false);
                           window.setTimeout(() => {
                             emitArchiveStyleToast({
                               line1: selectedWorkCatalogItem.title,
-                              line2: "добавлена в блок работ",
-                              navigateTo: `/work-orders/${CURRENT_WORK_ORDER_ID}?panel=orders&focusWorkId=${encodeURIComponent(newWorkId)}`,
+                              line2: addCatalogTarget === "parts" ? "добавлена в блок запчастей" : "добавлена в блок работ",
+                              navigateTo:
+                                addCatalogTarget === "parts"
+                                  ? `/work-orders/${currentWorkOrderId}?panel=parts&focusWorkId=${encodeURIComponent(newWorkId)}`
+                                  : `/work-orders/${currentWorkOrderId}?panel=orders&focusWorkId=${encodeURIComponent(newWorkId)}`,
                             });
                           }, 60);
                         }}
                         className="h-11 rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
                       >
-                        Добавить
+                        {addCatalogTarget === "parts"
+                          ? addWorkEditPartsTarget
+                            ? "Редактировать"
+                            : "Добавить"
+                          : addWorkEditWorksTarget
+                            ? "Редактировать"
+                            : "Добавить"}
                       </button>
                     </div>
                   </aside>
@@ -2128,11 +3736,35 @@ export function WorkOrdersDetailsPage() {
             >
               <button
                 type="button"
-                onClick={() => setSelectedPhotoIndex(null)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedPhotoIndex(null);
+                }}
                 className="absolute right-6 top-6 inline-flex h-11 w-11 items-center justify-center rounded-full bg-white/15 text-[28px] leading-none text-white transition hover:bg-white/25"
                 aria-label="Закрыть просмотр фото"
               >
                 ×
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (selectedPhotoIndex === null) return;
+                  removeCarPhotoAtIndex(selectedPhotoIndex);
+                }}
+                className="absolute bottom-8 left-1/2 z-10 inline-flex -translate-x-1/2 cursor-pointer items-center gap-2 rounded-full bg-white/15 px-5 py-2.5 text-[15px] font-semibold tracking-[-0.02em] text-white transition hover:bg-white/25"
+              >
+                <svg viewBox="0 0 24 24" fill="none" className="h-[18px] w-[18px] shrink-0" aria-hidden>
+                  <path
+                    d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2m2 0v12a2 2 0 01-2 2H9a2 2 0 01-2-2V7"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path d="M10 11v6M14 11v6" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" />
+                </svg>
+                Удалить
               </button>
               <button
                 type="button"
@@ -2191,6 +3823,14 @@ export function WorkOrdersDetailsPage() {
           }
           100% {
             box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
+          }
+        }
+        @keyframes archiveRowOut {
+          0% {
+            opacity: 1;
+          }
+          100% {
+            opacity: 0;
           }
         }
       `}</style>

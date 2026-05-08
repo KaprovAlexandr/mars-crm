@@ -1,10 +1,18 @@
 import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
 import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
+import { WORK_ORDER_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
 import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  insertWorkOrderStorageRow,
+  isWorkOrdersRemoteEnabled,
+  listWorkOrdersStorageRows,
+  updateWorkOrdersStorageRows,
+  type WorkOrderStorageRow,
+} from "@/lib/data/workOrdersDataSource";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type AnimationEvent } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
 
 type WorkOrderRow = {
@@ -22,14 +30,179 @@ type WorkOrderRow = {
 };
 
 type DateAcceptancePreset = "today" | "yesterday" | "last7" | "last30" | "custom";
-type WorkOrderActionId = "open" | "urgent" | "edit" | "archive";
+type WorkOrderActionId = "open" | "status" | "urgent" | "edit" | "archive" | "callClient" | "switchMaster";
 type WorkOrderActionEntry = { id: WorkOrderActionId; label: string; danger?: boolean };
 type EditWorkOrderDraft = {
   client: string;
   car: string;
   plate: string;
 };
+type ClientDirectoryEntry = {
+  fullName: string;
+  phone: string;
+  cars: Array<{ car: string; plate: string }>;
+};
+type CatalogWorkItem = {
+  section: string;
+  title: string;
+  price: number;
+};
+const TRANSFER_TO_WORK_ORDER_DRAFT_KEY = "transferToWorkOrderDraft";
 const workOrderMasterOverrideStorageKey = "workOrderMasterOverrides";
+const WORK_ORDERS_ROWS_PERSIST_KEY = "workOrdersRowsPersistedV1";
+const CLIENT_CARS_SHARED_STORAGE_KEY = "clientCarsSharedByFioV1";
+const clientDirectoryMock: ClientDirectoryEntry[] = [
+  { fullName: "Иванов Артём Сергеевич", phone: "+7 (999) 111-22-33", cars: [{ car: "BMW M5 F90", plate: "А123ВС777" }] },
+  {
+    fullName: "Смирнова Наталья Викторовна",
+    phone: "+7 (915) 222-33-44",
+    cars: [
+      { car: "BMW M5 Competition", plate: "М456КХ199" },
+      { car: "Hyundai Solaris", plate: "М456КХ199" },
+      { car: "Kia Rio", plate: "М456КХ199" },
+    ],
+  },
+  { fullName: "Журавлёв Михаил Дмитриевич", phone: "+7 (901) 700-11-22", cars: [{ car: "VW Polo", plate: "С555КК77" }] },
+  { fullName: "Павлова Ольга Дмитриевна", phone: "+7 (930) 456-70-80", cars: [{ car: "Skoda Kodiaq", plate: "Н442НР799" }] },
+];
+const WORK_CATALOG_ALL_SECTION = "Все работы";
+const workCatalogSections: Array<{ label: string; items: string[] }> = [
+  { label: WORK_CATALOG_ALL_SECTION, items: [] },
+  {
+    label: "Диагностика",
+    items: [
+      "Компьютерная диагностика",
+      "Диагностика ходовой части",
+      "Диагностика тормозной системы",
+      "Диагностика двигателя",
+      "Диагностика АКПП",
+      "Диагностика МКПП",
+      "Диагностика рулевого управления",
+      "Диагностика подвески",
+    ],
+  },
+  {
+    label: "Техническое обслуживание",
+    items: ["Замена масла в двигателе", "Замена масляного фильтра", "Замена воздушного фильтра", "Замена салонного фильтра", "Замена свечей зажигания"],
+  },
+  {
+    label: "Тормозная система",
+    items: ["Замена тормозных колодок (перед)", "Замена тормозных колодок (зад)", "Замена тормозных дисков", "Прокачка тормозной системы"],
+  },
+  { label: "Подвеска", items: ["Замена амортизаторов", "Замена стоек стабилизатора", "Замена шаровой опоры", "Сход-развал"] },
+  { label: "Двигатель", items: ["Замена ремня ГРМ", "Замена цепи ГРМ", "Замена термостата", "Ремонт двигателя"] },
+  { label: "Коробка передач", items: ["Замена сцепления", "Ремонт АКПП", "Ремонт МКПП", "Замена масла АКПП"] },
+  { label: "Рулевое управление", items: ["Замена рулевой рейки", "Ремонт рулевой рейки", "Замена жидкости ГУР"] },
+  { label: "Электрика", items: ["Замена аккумулятора", "Замена генератора", "Ремонт стартера", "Установка сигнализации"] },
+  { label: "Система охлаждения", items: ["Замена радиатора", "Замена патрубков", "Промывка системы охлаждения", "Замена антифриза"] },
+  { label: "Выхлопная система", items: ["Замена глушителя", "Замена катализатора", "Ремонт выхлопной системы"] },
+  { label: "Шиномонтаж", items: ["Снятие / установка колеса", "Балансировка колес", "Ремонт прокола", "Сезонная переобувка"] },
+  { label: "Кузовные работы", items: ["Полировка кузова", "Локальная покраска", "Ремонт бампера", "Удаление вмятин"] },
+  { label: "Доп. работы", items: ["Мойка автомобиля", "Химчистка салона", "Озонация салона", "Выездная диагностика"] },
+];
+const workCatalogMock: CatalogWorkItem[] = workCatalogSections.flatMap((section) =>
+  section.label === WORK_CATALOG_ALL_SECTION
+    ? []
+    : section.items.map((title, idx) => ({
+        section: section.label,
+        title,
+        price: 1700 + ((title.length + idx * 7) % 16) * 320,
+      })),
+);
+
+function formatRub(value: number): string {
+  return `${value.toLocaleString("ru-RU")} ₽`;
+}
+
+function maskRuPhoneInput(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  if (!digits) return "";
+  const normalized = digits.startsWith("8") ? `7${digits.slice(1)}` : digits.startsWith("7") ? digits : `7${digits}`;
+  const body = normalized.slice(1, 11);
+  const p1 = body.slice(0, 3);
+  const p2 = body.slice(3, 6);
+  const p3 = body.slice(6, 8);
+  const p4 = body.slice(8, 10);
+  if (body.length <= 3) return `+7${p1 ? ` (${p1}` : ""}`;
+  if (body.length <= 6) return `+7 (${p1}) ${p2}`;
+  if (body.length <= 8) return `+7 (${p1}) ${p2}-${p3}`;
+  return `+7 (${p1}) ${p2}-${p3}-${p4}`;
+}
+
+function national10FromPhoneInput(input: string): string {
+  const digits = input.replace(/\D/g, "");
+  if (!digits) return "";
+  const normalized = digits.startsWith("8") ? `7${digits.slice(1)}` : digits.startsWith("7") ? digits : `7${digits}`;
+  return normalized.slice(1, 11);
+}
+
+function normalizeRuFio(value: string): string {
+  return value.trim().toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ");
+}
+
+function toTelHref(raw: string): string {
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return "tel:";
+  const normalized = digits.startsWith("8") ? `7${digits.slice(1)}` : digits.startsWith("7") ? digits : `7${digits}`;
+  return `tel:+${normalized}`;
+}
+
+function normalizeTransferredText(input: string): string {
+  const value = input.trim();
+  if (!value) return "";
+  const normalized = value.toLowerCase();
+  if (normalized === "—" || normalized === "-" || normalized === "не указан" || normalized === "не указано") {
+    return "";
+  }
+  return value;
+}
+
+function splitClientNameForProfileLikeDisplay(fullName: string): { firstLine: string; secondLine: string } {
+  const clean = fullName.trim();
+  if (!clean) return { firstLine: "—", secondLine: "" };
+  const parts = clean.split(/\s+/);
+  if (parts.length === 1) return { firstLine: parts[0], secondLine: "" };
+  return {
+    firstLine: parts.slice(0, -1).join(" "),
+    secondLine: parts[parts.length - 1] ?? "",
+  };
+}
+
+function firstClientCar(entry: ClientDirectoryEntry | null): { car: string; plate: string } {
+  return entry?.cars?.[0] ?? { car: "", plate: "" };
+}
+
+function mapWorkOrderStorageToUi(row: WorkOrderStorageRow): WorkOrderRow {
+  return {
+    id: row.id,
+    status: row.status ?? "Новый",
+    client: row.client,
+    car: row.car,
+    plate: row.plate,
+    master: row.master,
+    masterPhoto: row.master_photo ?? masterPhotoByName[row.master] ?? "https://i.pravatar.cc/80",
+    amount: row.amount,
+    dueDate: row.due_date,
+    archived: Boolean(row.archived),
+    urgent: Boolean(row.urgent),
+  };
+}
+
+function mapUiWorkOrderToStorage(row: WorkOrderRow): WorkOrderStorageRow {
+  return {
+    id: row.id,
+    status: row.status,
+    client: row.client,
+    car: row.car,
+    plate: row.plate,
+    master: row.master,
+    master_photo: row.masterPhoto,
+    amount: row.amount,
+    due_date: row.dueDate,
+    archived: Boolean(row.archived),
+    urgent: Boolean(row.urgent),
+  };
+}
 
 function exportWorkOrdersToXlsx(workOrders: WorkOrderRow[]) {
   const data = workOrders.map((r) => ({
@@ -82,6 +255,37 @@ function WorkOrderActionIconArchive({ className = "" }: { className?: string }) 
   );
 }
 
+function WorkOrderActionIconStatus({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path d="M5 6h10M5 10h10M5 14h6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="14.5" cy="14" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function WorkOrderActionIconCall({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path
+        d="M5.6 3.5h2.3l1.1 3.1-1.5 1.5a11.6 11.6 0 0 0 4.4 4.4l1.5-1.5 3.1 1.1v2.3a1.3 1.3 0 0 1-1.3 1.3h-.6A11.6 11.6 0 0 1 4.3 5.4v-.6A1.3 1.3 0 0 1 5.6 3.5Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function WorkOrderActionIconSwitchMaster({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className={`h-5 w-5 shrink-0 ${className}`} aria-hidden>
+      <path d="M4 6h10m0 0-2-2m2 2-2 2M16 14H6m0 0 2-2m-2 2 2 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function formatRuDateFromDate(date: Date): string {
   const dd = String(date.getDate()).padStart(2, "0");
   const mm = String(date.getMonth() + 1).padStart(2, "0");
@@ -96,6 +300,19 @@ function maskRuDateInput(input: string): string {
   return `${digits.slice(0, 2)}.${digits.slice(2, 4)}.${digits.slice(4)}`;
 }
 
+function workOrdersCheckboxBox(checked: boolean) {
+  if (checked) {
+    return (
+      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] bg-[#d51a21] text-white">
+        <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5 shrink-0" aria-hidden>
+          <path d="M3 8L6.2 11L13 4.5" stroke="currentColor" strokeWidth="2.75" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </span>
+    );
+  }
+  return <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border-[2px] border-[#D8DBDE]" />;
+}
+
 const workOrderStatusColorMap: Record<WorkOrderRow["status"], string> = {
   Новый: "#ACACAC",
   "В работе": "#2E78C9",
@@ -105,9 +322,9 @@ const workOrderStatusColorMap: Record<WorkOrderRow["status"], string> = {
   "Отказ клиента": "#EC1C24",
 };
 
-const workOrderRows: WorkOrderRow[] = [
+export const workOrderRows: WorkOrderRow[] = [
   { id: "294894", client: "Иванов Артём Сергеевич", car: "BMW M5 F90", plate: "А123ВС777", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "18 500 ₽", dueDate: "02.04.2026" },
-  { id: "593423", client: "Смирнова Наталья Викторовна", car: "Kia Rio", plate: "М456КХ199", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Новый", amount: "12 300 ₽", dueDate: "04.04.2026" },
+  { id: "593423", client: "Смирнова Наталья Викторовна", car: "BMW M5 Competition", plate: "М456КХ199", master: "Семёнова Е.", masterPhoto: "https://i.pravatar.cc/80?img=32", status: "Новый", amount: "12 300 ₽", dueDate: "04.04.2026" },
   { id: "839022", client: 'ООО "Сад"', car: "Lada Priora", plate: "О789ЕН750", master: "Кириллов О.", masterPhoto: "https://i.pravatar.cc/80?img=14", status: "Ожидание запчастей", amount: "25 800 ₽", dueDate: "06.04.2026" },
   { id: "847952", client: "ИП Лебедев Максим Олегович", car: "Toyota Camry", plate: "Т321ОР197", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "В работе", amount: "9 700 ₽", dueDate: "08.04.2026" },
   { id: "495783", client: 'ООО "ЭкоМобил"', car: "Skoda Octavia", plate: "У654НС777", master: "Тимофеев А.", masterPhoto: "https://i.pravatar.cc/80?img=47", status: "Закрыт", amount: "31 400 ₽", dueDate: "10.04.2026" },
@@ -141,14 +358,139 @@ const masterPhotoByName: Record<string, string> = {
   "Захарова И.": "https://i.pravatar.cc/80?img=58",
 };
 
+type WorkOrdersTableDataRowProps = {
+  row: WorkOrderRow;
+  index: number;
+  isSelected: boolean;
+  isArchiving: boolean;
+  flashTargetId: string | null;
+  flashNonce: number;
+  rowRef: (el: HTMLTableRowElement | null) => void;
+  onRowNavigate: () => void;
+  onToggleSelect: () => void;
+  onOpenActions: () => void;
+  actionsModalOpenForThisRow: boolean;
+  onFlashAnimationEnd: (e: AnimationEvent, rowId: string) => void;
+};
+
+function WorkOrdersTableDataRow({
+  row,
+  index,
+  isSelected,
+  isArchiving,
+  flashTargetId,
+  flashNonce,
+  rowRef,
+  onRowNavigate,
+  onToggleSelect,
+  onOpenActions,
+  actionsModalOpenForThisRow,
+  onFlashAnimationEnd,
+}: WorkOrdersTableDataRowProps) {
+  const isFlashTarget = flashTargetId === row.id;
+  const highlightStyle = useMemo(
+    () => (isFlashTarget ? { animation: "workRowHighlightBorder 4s ease-out" as const } : undefined),
+    [isFlashTarget, flashNonce],
+  );
+  return (
+    <tr
+      ref={rowRef}
+      onClick={onRowNavigate}
+      className={`border-[5px] border-[#EEEDF0] transition ${
+        isArchiving
+          ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]"
+          : ""
+      } ${
+        isSelected
+          ? "bg-[rgba(224,9,25,0.10)]"
+          : `${index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"} hover:bg-[rgba(224,9,25,0.10)]`
+      }`}
+      style={highlightStyle}
+      onAnimationEnd={(e) => onFlashAnimationEnd(e, row.id)}
+    >
+      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+        <span
+          className="inline-flex cursor-pointer select-none items-center"
+          role="checkbox"
+          aria-checked={isSelected}
+          aria-label={`Выбрать заказ-наряд ${row.id}`}
+          onClick={onToggleSelect}
+        >
+          {workOrdersCheckboxBox(isSelected)}
+        </span>
+      </td>
+      <td className="px-4 py-3 text-black">
+        <span className="inline-flex items-center gap-1.5">
+          {row.urgent ? <span aria-label="Срочный заказ-наряд">🔥</span> : null}
+          <span>{row.id}</span>
+        </span>
+      </td>
+      <td className="px-4 py-3 text-black">{row.client}</td>
+      <td className="px-4 py-3 text-black">{row.car}</td>
+      <td className="px-4 py-3 text-black">{row.plate}</td>
+      <td className="px-4 py-3 font-medium">
+        <span className="inline-flex max-w-full items-center gap-2 text-black">
+          <span
+            className="h-2.5 w-2.5 shrink-0 rounded-full"
+            style={{ backgroundColor: workOrderStatusColorMap[row.status] }}
+          />
+          <span className="min-w-0 truncate text-[16px] font-medium text-black">{row.status}</span>
+        </span>
+      </td>
+      <td className="px-4 py-3 text-black">
+        <span className="inline-flex max-w-full items-center gap-1.5">
+          <img
+            src={row.masterPhoto}
+            alt=""
+            className="h-[1em] w-[1em] shrink-0 rounded-full object-cover ring-1 ring-black/10"
+          />
+          <span className="min-w-0 truncate">{row.master}</span>
+        </span>
+      </td>
+      <td className="px-4 py-3 text-black">{row.dueDate}</td>
+      <td className="px-4 py-3 text-black">{row.amount}</td>
+      <td className="px-4 py-3 text-center text-[#A0A0A0]">
+        <button
+          type="button"
+          className="cursor-pointer text-[#A0A0A0]"
+          aria-label={`Действия для заказ-наряда ${row.id}`}
+          aria-expanded={actionsModalOpenForThisRow}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenActions();
+          }}
+        >
+          ...
+        </button>
+      </td>
+    </tr>
+  );
+}
+
 export function WorkOrdersPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const isManager = CURRENT_USER_ROLE === "manager";
   const [searchParams, setSearchParams] = useSearchParams();
-  const highlightWorkOrderId = searchParams.get("workOrder");
+  const [flashHighlightWorkOrderId, setFlashHighlightWorkOrderId] = useState<string | null>(null);
+  const [flashHighlightNonce, setFlashHighlightNonce] = useState(0);
+  const [flashHighlightPage, setFlashHighlightPage] = useState<number | null>(null);
   const workOrderRowRefs = useRef<Record<string, HTMLTableRowElement | null>>({});
-  const workOrderScrollKey = useRef<string>("");
   const [rows, setRows] = useState<WorkOrderRow[]>(() => {
+    if (isWorkOrdersRemoteEnabled()) return [];
+    if (typeof window !== "undefined") {
+      try {
+        const persistedRaw = window.localStorage.getItem(WORK_ORDERS_ROWS_PERSIST_KEY);
+        if (persistedRaw) {
+          const persistedParsed = JSON.parse(persistedRaw);
+          if (Array.isArray(persistedParsed)) {
+            return persistedParsed as WorkOrderRow[];
+          }
+        }
+      } catch {
+        // ignore broken persisted payload and fall back to defaults
+      }
+    }
     let overrides: Record<string, string> = {};
     if (typeof window !== "undefined") {
       const raw = window.localStorage.getItem(workOrderMasterOverrideStorageKey);
@@ -171,9 +513,32 @@ export function WorkOrdersPage() {
       };
     });
   });
+  useEffect(() => {
+    if (!isWorkOrdersRemoteEnabled()) return;
+    let cancelled = false;
+    async function loadWorkOrdersFromSupabase() {
+      try {
+        const data = await listWorkOrdersStorageRows();
+        if (!cancelled && Array.isArray(data)) {
+          setRows(data.map((item) => mapWorkOrderStorageToUi(item as WorkOrderStorageRow)));
+        }
+      } catch (error) {
+        console.warn("Failed to load work orders from Supabase.", error);
+      }
+    }
+    void loadWorkOrdersFromSupabase();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
   const [workOrderActionsModal, setWorkOrderActionsModal] = useState<WorkOrderRow | null>(null);
+  const [switchMasterModalOpen, setSwitchMasterModalOpen] = useState(false);
+  const [switchMasterSelection, setSwitchMasterSelection] = useState<string | null>(null);
+  const [switchMasterTargetId, setSwitchMasterTargetId] = useState<string | null>(null);
+  const [archivingRowId, setArchivingRowId] = useState<string | null>(null);
+  const [workOrderStatusPickerIds, setWorkOrderStatusPickerIds] = useState<string[] | null>(null);
   const [editWorkOrderId, setEditWorkOrderId] = useState<string | null>(null);
   const [editWorkOrderDraft, setEditWorkOrderDraft] = useState<EditWorkOrderDraft | null>(null);
   const [openFilter, setOpenFilter] = useState<"status" | "master" | "dueDate" | null>(null);
@@ -188,12 +553,83 @@ export function WorkOrdersPage() {
   const [dateToInput, setDateToInput] = useState("");
   const [awaitingPaymentOnly, setAwaitingPaymentOnly] = useState(false);
   const [archiveOnly, setArchiveOnly] = useState(false);
-  const [delayOnly, setDelayOnly] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [sortState, setSortState] = useState<
     | { key: "id" | "status" | "client" | "car" | "plate" | "master" | "dueDate" | "amount"; dir: "asc" | "desc" }
     | null
   >(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(WORK_ORDERS_ROWS_PERSIST_KEY, JSON.stringify(rows));
+    } catch {
+      // ignore storage write errors
+    }
+  }, [rows]);
+  const [createOrderModalOpen, setCreateOrderModalOpen] = useState(false);
+  const [createOrderModalMounted, setCreateOrderModalMounted] = useState(false);
+  const [createOrderModalActive, setCreateOrderModalActive] = useState(false);
+  const [createOrderStep, setCreateOrderStep] = useState<1 | 2 | 3 | 4>(1);
+  const [createOrderPhoneNational10, setCreateOrderPhoneNational10] = useState("");
+  const [createOrderMode, setCreateOrderMode] = useState<"existing" | "new" | null>(null);
+  const [createOrderExistingSurname, setCreateOrderExistingSurname] = useState("");
+  const [createOrderExistingClient, setCreateOrderExistingClient] = useState<ClientDirectoryEntry | null>(null);
+  const [createOrderExistingCar, setCreateOrderExistingCar] = useState<{ car: string; plate: string } | null>(null);
+  const [createOrderNewClientName, setCreateOrderNewClientName] = useState("");
+  const [createOrderNewClientPhoneNational10, setCreateOrderNewClientPhoneNational10] = useState("");
+  const [createOrderNewClientCar, setCreateOrderNewClientCar] = useState("");
+  const [createOrderNewClientPlate, setCreateOrderNewClientPlate] = useState("");
+  const [createOrderCatalogQuery, setCreateOrderCatalogQuery] = useState("");
+  const [createOrderWorkCategory, setCreateOrderWorkCategory] = useState(WORK_CATALOG_ALL_SECTION);
+  const [createOrderSelectedWorks, setCreateOrderSelectedWorks] = useState<Set<string>>(() => new Set());
+  const [createOrderSelectedMaster, setCreateOrderSelectedMaster] = useState<string | null>(null);
+  const createOrderOpenRafRef = useRef<number | null>(null);
+  const createOrderOpenTimerRef = useRef<number | null>(null);
+  const [transferOrderModalOpen, setTransferOrderModalOpen] = useState(false);
+  const [transferOrderModalMounted, setTransferOrderModalMounted] = useState(false);
+  const [transferOrderModalActive, setTransferOrderModalActive] = useState(false);
+  const [transferOrderStep, setTransferOrderStep] = useState<2 | 21 | 3>(2);
+  const [transferOrderClientName, setTransferOrderClientName] = useState("");
+  const [transferOrderClientPhone, setTransferOrderClientPhone] = useState("");
+  const [transferOrderClientCar, setTransferOrderClientCar] = useState("");
+  const [transferOrderClientPlate, setTransferOrderClientPlate] = useState("");
+  const [transferOrderMissingField, setTransferOrderMissingField] = useState<"phone" | "car" | "plate" | null>(null);
+  const [transferOrderCatalogQuery, setTransferOrderCatalogQuery] = useState("");
+  const [transferOrderWorkCategory, setTransferOrderWorkCategory] = useState(WORK_CATALOG_ALL_SECTION);
+  const [transferOrderSelectedWorks, setTransferOrderSelectedWorks] = useState<Set<string>>(() => new Set());
+  const transferOrderOpenRafRef = useRef<number | null>(null);
+  const transferOrderOpenTimerRef = useRef<number | null>(null);
+  const skipTransferOrderResetOnceRef = useRef(false);
+  const clientDirectory = useMemo<ClientDirectoryEntry[]>(() => {
+    if (typeof window === "undefined") return clientDirectoryMock;
+    type SharedCarsMap = Record<string, Array<{ car: string; plate: string }>>;
+    let sharedByFio: SharedCarsMap = {};
+    try {
+      const raw = window.sessionStorage.getItem(CLIENT_CARS_SHARED_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as SharedCarsMap;
+        if (parsed && typeof parsed === "object") sharedByFio = parsed;
+      }
+    } catch {
+      sharedByFio = {};
+    }
+
+    return clientDirectoryMock.map((entry) => {
+      const fioKey = normalizeRuFio(entry.fullName);
+      const sharedCars = Array.isArray(sharedByFio[fioKey]) ? sharedByFio[fioKey] : [];
+      if (sharedCars.length === 0) return entry;
+      const mergedCars = [...entry.cars];
+      for (const shared of sharedCars) {
+        const car = (shared?.car ?? "").trim();
+        if (!car) continue;
+        const exists = mergedCars.some((item) => item.car.trim().toLowerCase() === car.toLowerCase());
+        if (exists) continue;
+        mergedCars.push({ car, plate: (shared?.plate ?? "").trim() });
+      }
+      return { ...entry, cars: mergedCars };
+    });
+  }, [createOrderModalOpen, location.key]);
 
   function parseRuDate(s: string): Date | null {
     const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(s.trim());
@@ -206,12 +642,312 @@ export function WorkOrdersPage() {
     return dt;
   }
 
-  function isDelayedWorkOrder(row: WorkOrderRow, now: Date): boolean {
-    if (row.status !== "В работе" && row.status !== "Новый") return false;
-    const acceptedAt = parseRuDate(row.dueDate);
-    if (!acceptedAt) return false;
-    const delayedFromMs = acceptedAt.getTime() + 24 * 60 * 60 * 1000;
-    return now.getTime() >= delayedFromMs;
+  const createOrderPhoneMatch = useMemo(() => {
+    if (createOrderPhoneNational10.length !== 10) return null;
+    return (
+      clientDirectory.find((client) => national10FromPhoneInput(client.phone) === createOrderPhoneNational10) ?? null
+    );
+  }, [clientDirectory, createOrderPhoneNational10]);
+
+  const createOrderSurnameCandidates = useMemo(() => {
+    if (createOrderMode !== "existing") return [];
+    const query = createOrderExistingSurname.trim().toLowerCase();
+    if (!query) return [];
+    return clientDirectory.filter((client) => client.fullName.toLowerCase().startsWith(query));
+  }, [clientDirectory, createOrderMode, createOrderExistingSurname]);
+
+  const createOrderCatalogItems = useMemo(() => {
+    const q = createOrderCatalogQuery.trim().toLowerCase();
+    return workCatalogMock.filter((item) => {
+      if (createOrderWorkCategory !== WORK_CATALOG_ALL_SECTION && item.section !== createOrderWorkCategory) return false;
+      if (!q) return true;
+      return item.title.toLowerCase().includes(q);
+    });
+  }, [createOrderCatalogQuery, createOrderWorkCategory]);
+
+  const createOrderSelectedWorkItems = useMemo(
+    () => workCatalogMock.filter((item) => createOrderSelectedWorks.has(item.title)),
+    [createOrderSelectedWorks],
+  );
+
+  const createOrderTotalAmount = useMemo(
+    () => createOrderSelectedWorkItems.reduce((sum, item) => sum + item.price, 0),
+    [createOrderSelectedWorkItems],
+  );
+
+  const createOrderResolvedClient = useMemo(() => {
+    if (createOrderPhoneMatch) {
+      const carChoice = firstClientCar(createOrderPhoneMatch);
+      return {
+        fullName: createOrderPhoneMatch.fullName,
+        phone: createOrderPhoneMatch.phone,
+        car: carChoice.car,
+        plate: carChoice.plate || "—",
+      };
+    }
+    if (createOrderMode === "existing" && createOrderExistingClient && createOrderExistingCar) {
+      return {
+        fullName: createOrderExistingClient.fullName,
+        phone: createOrderExistingClient.phone,
+        car: createOrderExistingCar.car,
+        plate: createOrderExistingCar.plate || "—",
+      };
+    }
+    if (createOrderMode === "new") {
+      return {
+        fullName: createOrderNewClientName.trim(),
+        phone: maskRuPhoneInput(createOrderNewClientPhoneNational10),
+        car: createOrderNewClientCar.trim(),
+        plate: createOrderNewClientPlate.trim() || "—",
+      };
+    }
+    return null;
+  }, [
+    createOrderPhoneMatch,
+    createOrderMode,
+    createOrderExistingClient,
+    createOrderExistingCar,
+    createOrderNewClientName,
+    createOrderNewClientPhoneNational10,
+    createOrderNewClientCar,
+    createOrderNewClientPlate,
+  ]);
+  const createOrderClientNameLines = useMemo(
+    () => splitClientNameForProfileLikeDisplay(createOrderResolvedClient?.fullName ?? ""),
+    [createOrderResolvedClient?.fullName],
+  );
+  const transferOrderClientNameLines = useMemo(
+    () => splitClientNameForProfileLikeDisplay(transferOrderClientName),
+    [transferOrderClientName],
+  );
+
+  const canGoToCreateOrderStep2 = useMemo(() => {
+    if (createOrderPhoneMatch) return true;
+    if (createOrderMode === "existing") return Boolean(createOrderExistingClient && createOrderExistingCar);
+    if (createOrderMode === "new") {
+      return Boolean(
+        createOrderNewClientName.trim() &&
+          createOrderNewClientPhoneNational10.length === 10 &&
+          createOrderNewClientCar.trim() &&
+          createOrderNewClientPlate.trim(),
+      );
+    }
+    return false;
+  }, [
+    createOrderPhoneMatch,
+    createOrderMode,
+    createOrderExistingClient,
+    createOrderExistingCar,
+    createOrderNewClientName,
+    createOrderNewClientPhoneNational10,
+    createOrderNewClientCar,
+    createOrderNewClientPlate,
+  ]);
+  const transferOrderCatalogItems = useMemo(() => {
+    const q = transferOrderCatalogQuery.trim().toLowerCase();
+    return workCatalogMock.filter((item) => {
+      if (transferOrderWorkCategory !== WORK_CATALOG_ALL_SECTION && item.section !== transferOrderWorkCategory) return false;
+      if (!q) return true;
+      return item.title.toLowerCase().includes(q);
+    });
+  }, [transferOrderCatalogQuery, transferOrderWorkCategory]);
+  const transferOrderSelectedWorkItems = useMemo(
+    () => workCatalogMock.filter((item) => transferOrderSelectedWorks.has(item.title)),
+    [transferOrderSelectedWorks],
+  );
+  const transferOrderTotalAmount = useMemo(
+    () => transferOrderSelectedWorkItems.reduce((sum, item) => sum + item.price, 0),
+    [transferOrderSelectedWorkItems],
+  );
+  const createOrderMasterOptions = useMemo(() => {
+    const fromRows = rows.map((row) => row.master).filter(Boolean);
+    const all = [...new Set([...fromRows, ...Object.keys(masterPhotoByName)])];
+    return all.sort((a, b) => a.localeCompare(b, "ru"));
+  }, [rows]);
+  function resetCreateOrderModalState() {
+    setCreateOrderStep(1);
+    setCreateOrderPhoneNational10("");
+    setCreateOrderMode(null);
+    setCreateOrderExistingSurname("");
+    setCreateOrderExistingClient(null);
+    setCreateOrderExistingCar(null);
+    setCreateOrderNewClientName("");
+    setCreateOrderNewClientPhoneNational10("");
+    setCreateOrderNewClientCar("");
+    setCreateOrderNewClientPlate("");
+    setCreateOrderCatalogQuery("");
+    setCreateOrderWorkCategory(WORK_CATALOG_ALL_SECTION);
+    setCreateOrderSelectedWorks(new Set());
+    setCreateOrderSelectedMaster(null);
+  }
+
+  function closeCreateOrderModal() {
+    setCreateOrderModalOpen(false);
+  }
+
+  function resetTransferOrderModalState() {
+    setTransferOrderStep(2);
+    setTransferOrderClientName("");
+    setTransferOrderClientPhone("");
+    setTransferOrderClientCar("");
+    setTransferOrderClientPlate("");
+    setTransferOrderMissingField(null);
+    setTransferOrderCatalogQuery("");
+    setTransferOrderWorkCategory(WORK_CATALOG_ALL_SECTION);
+    setTransferOrderSelectedWorks(new Set());
+  }
+
+  function closeTransferOrderModal() {
+    setTransferOrderModalOpen(false);
+    if (typeof window !== "undefined") {
+      window.sessionStorage.removeItem(TRANSFER_TO_WORK_ORDER_DRAFT_KEY);
+    }
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("newWorkOrderFromBooking");
+        next.delete("transferToken");
+        next.delete("client");
+        next.delete("phone");
+        next.delete("car");
+        next.delete("plate");
+        return next;
+      },
+      { replace: true },
+    );
+  }
+
+  function commitCreatedWorkOrder() {
+    if (!createOrderResolvedClient) return;
+    if (createOrderSelectedWorkItems.length === 0) return;
+    const maxNumericId = rows.reduce((max, row) => {
+      const current = Number(row.id);
+      if (!Number.isFinite(current)) return max;
+      return current > max ? current : max;
+    }, 0);
+    const newId = String(maxNumericId + 1).padStart(6, "0");
+    const primaryMaster = createOrderSelectedMaster ?? rows[0]?.master ?? "Алексеев Д.";
+    const newRow: WorkOrderRow = {
+      id: newId,
+      client: createOrderResolvedClient.fullName,
+      car: createOrderResolvedClient.car,
+      plate: createOrderResolvedClient.plate || "—",
+      master: primaryMaster,
+      masterPhoto: masterPhotoByName[primaryMaster] ?? "https://i.pravatar.cc/80",
+      status: "Новый",
+      amount: formatRub(createOrderTotalAmount),
+      dueDate: formatRuDateFromDate(new Date()),
+      urgent: false,
+      archived: false,
+    };
+    if (isWorkOrdersRemoteEnabled()) {
+      void (async () => {
+        try {
+          const payload = mapUiWorkOrderToStorage(newRow);
+          const data = await insertWorkOrderStorageRow(payload);
+          if (data) {
+            setRows((prev) => [mapWorkOrderStorageToUi(data as WorkOrderStorageRow), ...prev]);
+          } else {
+            setRows((prev) => [newRow, ...prev]);
+          }
+          setCurrentPage(1);
+          setSelectedRowIds(new Set());
+          closeCreateOrderModal();
+          window.setTimeout(() => {
+            emitArchiveStyleToast({
+              line1: `Заказ-наряд № ${newId}`,
+              line2: "успешно создан",
+              navigateTo: `/work-orders/${newId}`,
+            });
+          }, 60);
+        } catch (error) {
+          console.warn("Failed to create work order in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: "Не удалось создать заказ-наряд",
+            line2: "Проверьте подключение к базе и policy insert",
+          });
+        }
+      })();
+      return;
+    }
+    setRows((prev) => [newRow, ...prev]);
+    setCurrentPage(1);
+    setSelectedRowIds(new Set());
+    closeCreateOrderModal();
+    window.setTimeout(() => {
+      emitArchiveStyleToast({
+        line1: `Заказ-наряд № ${newId}`,
+        line2: "успешно создан",
+        navigateTo: `/work-orders/${newId}`,
+      });
+    }, 60);
+  }
+
+  function commitTransferredWorkOrder() {
+    if (!transferOrderClientName.trim()) return;
+    if (!transferOrderClientPhone.trim()) return;
+    if (transferOrderSelectedWorkItems.length === 0) return;
+    const maxNumericId = rows.reduce((max, row) => {
+      const current = Number(row.id);
+      if (!Number.isFinite(current)) return max;
+      return current > max ? current : max;
+    }, 0);
+    const newId = String(maxNumericId + 1).padStart(6, "0");
+    const primaryMaster = rows[0]?.master ?? "Алексеев Д.";
+    const newRow: WorkOrderRow = {
+      id: newId,
+      client: transferOrderClientName.trim(),
+      car: transferOrderClientCar.trim() || "—",
+      plate: transferOrderClientPlate.trim() || "—",
+      master: primaryMaster,
+      masterPhoto: masterPhotoByName[primaryMaster] ?? "https://i.pravatar.cc/80",
+      status: "Новый",
+      amount: formatRub(transferOrderTotalAmount),
+      dueDate: formatRuDateFromDate(new Date()),
+      urgent: false,
+      archived: false,
+    };
+    if (isWorkOrdersRemoteEnabled()) {
+      void (async () => {
+        try {
+          const payload = mapUiWorkOrderToStorage(newRow);
+          const data = await insertWorkOrderStorageRow(payload);
+          if (data) {
+            setRows((prev) => [mapWorkOrderStorageToUi(data as WorkOrderStorageRow), ...prev]);
+          } else {
+            setRows((prev) => [newRow, ...prev]);
+          }
+          setCurrentPage(1);
+          setSelectedRowIds(new Set());
+          closeTransferOrderModal();
+          window.setTimeout(() => {
+            emitArchiveStyleToast({
+              line1: `Заказ-наряд № ${newId}`,
+              line2: "успешно создан",
+              navigateTo: `/work-orders/${newId}`,
+            });
+          }, 60);
+        } catch (error) {
+          console.warn("Failed to create transferred work order in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: "Не удалось создать заказ-наряд",
+            line2: "Проверьте подключение к базе и policy insert",
+          });
+        }
+      })();
+      return;
+    }
+    setRows((prev) => [newRow, ...prev]);
+    setCurrentPage(1);
+    setSelectedRowIds(new Set());
+    closeTransferOrderModal();
+    window.setTimeout(() => {
+      emitArchiveStyleToast({
+        line1: `Заказ-наряд № ${newId}`,
+        line2: "успешно создан",
+        navigateTo: `/work-orders/${newId}`,
+      });
+    }, 60);
   }
 
   useEffect(() => {
@@ -235,6 +971,139 @@ export function WorkOrdersPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [editWorkOrderId]);
 
+  useEffect(() => {
+    const transferState = (location.state as { transferToWorkOrder?: { client?: string; phone?: string; car?: string; plate?: string; token?: string } } | null)?.transferToWorkOrder;
+    let storageClient = "";
+    let storagePhone = "";
+    let storageCar = "";
+    let storagePlate = "";
+    if (typeof window !== "undefined") {
+      const raw = window.sessionStorage.getItem(TRANSFER_TO_WORK_ORDER_DRAFT_KEY);
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw) as { client?: string; phone?: string; car?: string; plate?: string; token?: string };
+          storageClient = (parsed.client ?? "").trim();
+          storagePhone = (parsed.phone ?? "").trim();
+          storageCar = (parsed.car ?? "").trim();
+          storagePlate = (parsed.plate ?? "").trim();
+        } catch {
+          storageClient = "";
+          storagePhone = "";
+          storageCar = "";
+          storagePlate = "";
+        }
+      }
+    }
+    const stateClient = (transferState?.client ?? "").trim();
+    const statePhone = (transferState?.phone ?? "").trim();
+    const stateCar = normalizeTransferredText(transferState?.car ?? "");
+    const statePlate = normalizeTransferredText(transferState?.plate ?? "");
+    const queryClient = (searchParams.get("client") ?? "").trim();
+    const queryPhone = (searchParams.get("phone") ?? "").trim();
+    const queryCar = normalizeTransferredText(searchParams.get("car") ?? "");
+    const queryPlate = normalizeTransferredText(searchParams.get("plate") ?? "");
+    const client = stateClient || queryClient || storageClient;
+    const phone = statePhone || queryPhone || storagePhone;
+    const car = stateCar || queryCar || normalizeTransferredText(storageCar);
+    const plate = statePlate || queryPlate || normalizeTransferredText(storagePlate);
+    if (searchParams.get("newWorkOrderFromBooking") !== "1" && !client) return;
+    if (!client) return;
+    const directoryClient =
+      clientDirectory.find((entry) => entry.fullName.trim().toLowerCase() === client.trim().toLowerCase()) ?? null;
+    const directoryFirstCar = firstClientCar(directoryClient);
+    const resolvedPhone = phone || directoryClient?.phone || "";
+    const resolvedCar = car || directoryFirstCar.car || "";
+    const resolvedPlate = plate || directoryFirstCar.plate || "";
+    skipTransferOrderResetOnceRef.current = true;
+    setTransferOrderStep(2);
+    setTransferOrderClientName(client);
+    setTransferOrderClientPhone(resolvedPhone);
+    setTransferOrderClientCar(resolvedCar);
+    setTransferOrderClientPlate(resolvedPlate);
+    setTransferOrderMissingField(null);
+    setTransferOrderCatalogQuery("");
+    setTransferOrderWorkCategory(WORK_CATALOG_ALL_SECTION);
+    setTransferOrderSelectedWorks(new Set());
+    setTransferOrderModalOpen(true);
+
+    if (transferState) {
+      navigate(location.pathname + location.search, { replace: true, state: null });
+    }
+  }, [clientDirectory, location.pathname, location.search, location.state, navigate, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (createOrderModalOpen) {
+      setCreateOrderModalMounted(true);
+      setCreateOrderModalActive(false);
+      const raf = window.requestAnimationFrame(() => {
+        createOrderOpenRafRef.current = window.requestAnimationFrame(() => {
+          createOrderOpenTimerRef.current = window.setTimeout(() => setCreateOrderModalActive(true), 90);
+        });
+      });
+      createOrderOpenRafRef.current = raf;
+      return () => {
+        if (createOrderOpenRafRef.current !== null) {
+          window.cancelAnimationFrame(createOrderOpenRafRef.current);
+          createOrderOpenRafRef.current = null;
+        }
+        if (createOrderOpenTimerRef.current !== null) {
+          window.clearTimeout(createOrderOpenTimerRef.current);
+          createOrderOpenTimerRef.current = null;
+        }
+      };
+    }
+    setCreateOrderModalActive(false);
+    return;
+  }, [createOrderModalOpen]);
+
+  useEffect(() => {
+    if (createOrderMode !== "existing") {
+      setCreateOrderExistingClient(null);
+      setCreateOrderExistingCar(null);
+    }
+  }, [createOrderMode]);
+
+  useEffect(() => {
+    if (createOrderModalOpen) return;
+    if (createOrderModalMounted || createOrderModalActive) return;
+    resetCreateOrderModalState();
+  }, [createOrderModalOpen, createOrderModalMounted, createOrderModalActive]);
+
+  useEffect(() => {
+    if (transferOrderModalOpen) {
+      setTransferOrderModalMounted(true);
+      setTransferOrderModalActive(false);
+      const raf = window.requestAnimationFrame(() => {
+        transferOrderOpenRafRef.current = window.requestAnimationFrame(() => {
+          transferOrderOpenTimerRef.current = window.setTimeout(() => setTransferOrderModalActive(true), 90);
+        });
+      });
+      transferOrderOpenRafRef.current = raf;
+      return () => {
+        if (transferOrderOpenRafRef.current !== null) {
+          window.cancelAnimationFrame(transferOrderOpenRafRef.current);
+          transferOrderOpenRafRef.current = null;
+        }
+        if (transferOrderOpenTimerRef.current !== null) {
+          window.clearTimeout(transferOrderOpenTimerRef.current);
+          transferOrderOpenTimerRef.current = null;
+        }
+      };
+    }
+    setTransferOrderModalActive(false);
+    return;
+  }, [transferOrderModalOpen]);
+
+  useEffect(() => {
+    if (transferOrderModalOpen) return;
+    if (transferOrderModalMounted || transferOrderModalActive) return;
+    if (skipTransferOrderResetOnceRef.current) {
+      skipTransferOrderResetOnceRef.current = false;
+      return;
+    }
+    resetTransferOrderModalState();
+  }, [transferOrderModalOpen, transferOrderModalMounted, transferOrderModalActive]);
+
   const PAGE_SIZE = 12;
 
   const displayRows = useMemo(() => {
@@ -242,14 +1111,13 @@ export function WorkOrdersPage() {
     const qDigits = searchQuery.replace(/\D/g, "");
     const fromD = parseRuDate(dateFromInput);
     const toD = parseRuDate(dateToInput);
-    const now = new Date();
     const fromBound = fromD ? new Date(fromD.getFullYear(), fromD.getMonth(), fromD.getDate()) : null;
     const toBound = toD ? new Date(toD.getFullYear(), toD.getMonth(), toD.getDate(), 23, 59, 59, 999) : null;
 
     return rows.filter((row) => {
       if (qText) {
         const byClient = row.client.toLowerCase().includes(qText);
-        const byId = row.id.includes(qDigits);
+        const byId = qDigits.length > 0 && row.id.includes(qDigits);
         if (!byClient && !byId) return false;
       }
       if (archiveOnly) {
@@ -258,7 +1126,6 @@ export function WorkOrdersPage() {
         return false;
       }
       if (awaitingPaymentOnly && row.status !== "Готово") return false;
-      if (delayOnly && !isDelayedWorkOrder(row, now)) return false;
       if (!statusFilter.has(row.status)) return false;
       if (!masterFilter.has(row.master)) return false;
       const rowDate = parseRuDate(row.dueDate);
@@ -266,7 +1133,7 @@ export function WorkOrdersPage() {
       if (toBound && (!rowDate || rowDate > toBound)) return false;
       return true;
     });
-  }, [rows, searchQuery, awaitingPaymentOnly, archiveOnly, delayOnly, statusFilter, masterFilter, dateFromInput, dateToInput]);
+  }, [rows, searchQuery, awaitingPaymentOnly, archiveOnly, statusFilter, masterFilter, dateFromInput, dateToInput]);
 
   const sortedRows = useMemo(() => {
     if (!sortState) return displayRows;
@@ -288,15 +1155,10 @@ export function WorkOrdersPage() {
     return arr;
   }, [displayRows, sortState]);
 
-  const workOrdersCountLabel = useMemo(() => {
-    const n = rows.length;
-    const mod10 = n % 10;
-    const mod100 = n % 100;
-    let word = "заказ-нарядов";
-    if (mod10 === 1 && mod100 !== 11) word = "заказ-наряд";
-    else if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 > 20)) word = "заказ-наряда";
-    return `${n} ${word}`;
-  }, [rows.length]);
+  const sortedRowsRef = useRef(sortedRows);
+  sortedRowsRef.current = sortedRows;
+
+  const workOrdersCount = rows.length;
 
   const totalPages = Math.max(1, Math.ceil(sortedRows.length / PAGE_SIZE));
   const currentPageSafe = Math.min(currentPage, totalPages);
@@ -312,54 +1174,132 @@ export function WorkOrdersPage() {
     paginationItems.findIndex((item) => item === currentPageSafe),
   );
   const allPageRowsSelected = pagedRows.length > 0 && pagedRows.every((r) => selectedRowIds.has(r.id));
-  const awaitingPaymentCount = rows.filter((r) => r.status === "Готово").length;
+  const awaitingPaymentCount = rows.filter((r) => r.status === "Готово" && (archiveOnly ? Boolean(r.archived) : !Boolean(r.archived))).length;
   const archiveCount = rows.filter((r) => Boolean(r.archived)).length;
-  const delayCount = rows.filter((r) => isDelayedWorkOrder(r, new Date())).length;
+
+  const currentPageRef = useRef(currentPage);
+  currentPageRef.current = currentPage;
+  const focusWorkOrderFiltersResetFor = useRef<string | null>(null);
+  const focusWorkOrderScrollKey = useRef<string>("");
 
   useLayoutEffect(() => {
     const wid = searchParams.get("workOrder");
     if (!wid) {
-      workOrderScrollKey.current = "";
+      focusWorkOrderFiltersResetFor.current = null;
       return;
     }
-    const targetIndex = sortedRows.findIndex((r) => r.id === wid);
-    if (targetIndex === -1) {
+    const targetArchiveMode = searchParams.get("archive") === "1";
+    if (!rows.some((r) => r.id === wid)) {
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
           next.delete("workOrder");
+          next.delete("archive");
           return next;
         },
         { replace: true },
       );
-      workOrderScrollKey.current = "";
+      focusWorkOrderFiltersResetFor.current = null;
       return;
     }
-    if (workOrderScrollKey.current === wid) return;
-    workOrderScrollKey.current = wid;
-    const targetPage = Math.floor(targetIndex / PAGE_SIZE) + 1;
-    if (currentPage !== targetPage) {
-      setCurrentPage(targetPage);
+    if (focusWorkOrderFiltersResetFor.current === wid) return;
+    focusWorkOrderFiltersResetFor.current = wid;
+
+    setSearchQuery("");
+    setAwaitingPaymentOnly(false);
+    setArchiveOnly(targetArchiveMode);
+    setOpenFilter(null);
+    setSelectedRowIds(new Set());
+    setSortState(null);
+    setDatePreset(null);
+    setDateFromInput("");
+    setDateToInput("");
+    setStatusFilter(new Set(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"]));
+    setMasterFilter(new Set([...new Set(rows.map((r) => r.master))]));
+  }, [searchParams, rows, setSearchParams]);
+
+  useLayoutEffect(() => {
+    const wid = searchParams.get("workOrder");
+    if (!wid) {
+      focusWorkOrderScrollKey.current = "";
+      return;
     }
-    const tid = window.setTimeout(() => {
-      setSearchParams(
-        (prev) => {
-          const next = new URLSearchParams(prev);
-          next.delete("workOrder");
-          return next;
-        },
-        { replace: true },
-      );
-      workOrderScrollKey.current = "";
-    }, 4000);
+    if (typeof window !== "undefined") {
+      window.sessionStorage.removeItem(WORK_ORDER_LIST_FLASH_ARMED_KEY);
+    }
+    const idx = sortedRows.findIndex((r) => r.id === wid);
+    if (idx === -1) return;
+    const scrollKey = `${wid}@${idx}`;
+    if (focusWorkOrderScrollKey.current === scrollKey) return;
+    focusWorkOrderScrollKey.current = scrollKey;
+    const targetPage = Math.floor(idx / PAGE_SIZE) + 1;
+    setFlashHighlightWorkOrderId(wid);
+    setFlashHighlightPage(targetPage);
+    setFlashHighlightNonce((n) => n + 1);
+    setCurrentPage(targetPage);
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.delete("workOrder");
+        next.delete("archive");
+        return next;
+      },
+      { replace: true },
+    );
+    const clearFlashTid = window.setTimeout(() => {
+      setFlashHighlightWorkOrderId((prev) => (prev === wid ? null : prev));
+      setFlashHighlightPage((prev) => (prev === targetPage ? null : prev));
+    }, 4200);
+    const clearRefsTid = window.setTimeout(() => {
+      focusWorkOrderScrollKey.current = "";
+      focusWorkOrderFiltersResetFor.current = null;
+    }, 1200);
     return () => {
-      window.clearTimeout(tid);
+      window.clearTimeout(clearFlashTid);
+      window.clearTimeout(clearRefsTid);
     };
-  }, [searchParams, sortedRows, setSearchParams, currentPage]);
+  }, [searchParams, sortedRows, setSearchParams]);
+
+  function onWorkOrderFlashAnimationEnd(e: AnimationEvent, rowId: string) {
+    if (e.animationName !== "workRowHighlightBorder") return;
+    setFlashHighlightWorkOrderId((cur) => (cur === rowId ? null : cur));
+  }
+
+  function handleCreateOrderDrawerTransitionEnd() {
+    if (createOrderModalOpen) return;
+    if (createOrderModalActive) return;
+    setCreateOrderModalMounted(false);
+  }
+
+  function handleTransferOrderDrawerTransitionEnd() {
+    if (transferOrderModalOpen) return;
+    if (transferOrderModalActive) return;
+    setTransferOrderModalMounted(false);
+  }
 
   useEffect(() => {
     if (currentPage > totalPages) setCurrentPage(totalPages);
   }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    if (!switchMasterModalOpen) {
+      setSwitchMasterSelection(null);
+      setSwitchMasterTargetId(null);
+    }
+  }, [switchMasterModalOpen]);
+
+  useEffect(() => {
+    if (!flashHighlightWorkOrderId || flashHighlightPage === null) return;
+    if (currentPage !== flashHighlightPage) {
+      setFlashHighlightWorkOrderId(null);
+      setFlashHighlightPage(null);
+    }
+  }, [currentPage, flashHighlightWorkOrderId, flashHighlightPage]);
+
+  function clearWorkOrderFlashState() {
+    setFlashHighlightWorkOrderId(null);
+    setFlashHighlightPage(null);
+  }
 
   function toggleSort(key: "id" | "status" | "client" | "car" | "plate" | "master" | "dueDate" | "amount") {
     setSortState((prev) => {
@@ -394,10 +1334,10 @@ export function WorkOrdersPage() {
   }
 
   function resetFilters() {
+    clearWorkOrderFlashState();
     setSearchQuery("");
     setAwaitingPaymentOnly(false);
     setArchiveOnly(false);
-    setDelayOnly(false);
     setSelectedRowIds(new Set());
     setOpenFilter(null);
     setStatusFilter(new Set(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"]));
@@ -441,68 +1381,199 @@ export function WorkOrdersPage() {
 
   const panelBase = "absolute left-0 top-full z-30 mt-2 min-w-[240px] rounded-[10px] border border-[#DDE1E7] bg-white p-3 shadow-lg";
 
-  function checkboxBox(checked: boolean) {
-    if (checked) {
-      return (
-        <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] bg-[#d51a21] text-white">
-          <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5 shrink-0" aria-hidden>
-            <path d="M3 8L6.2 11L13 4.5" stroke="currentColor" strokeWidth="2.75" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </span>
-      );
-    }
-    return <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-[3px] border-[2px] border-[#D8DBDE]" />;
-  }
-
   const workOrderModalActions: WorkOrderActionEntry[] = useMemo(() => {
     if (!workOrderActionsModal) return [];
     const current = rows.find((r) => r.id === workOrderActionsModal.id) ?? workOrderActionsModal;
+    const isArchivedContext = Boolean(current.archived) || archiveOnly;
+    if (selectedRowIds.size > 1) {
+      return [
+        { id: "status", label: "Изменить статус" },
+        { id: "urgent", label: "Сделать срочным" },
+        isArchivedContext
+          ? { id: "archive", label: "Вернуть в таблицу" }
+          : { id: "archive", label: "Переместить в архив", danger: true },
+      ];
+    }
     return [
       { id: "open", label: "Открыть заказ-наряд" },
+      { id: "callClient", label: "Позвонить клиенту" },
+      { id: "status", label: "Изменить статус" },
+      { id: "switchMaster", label: "Сменить мастера" },
       { id: "urgent", label: current.urgent ? "Убрать срочность" : "Сделать срочным" },
       { id: "edit", label: "Редактировать" },
-      { id: "archive", label: "Переместить в архив", danger: true },
+      isArchivedContext
+        ? { id: "archive", label: "Вернуть в таблицу" }
+        : { id: "archive", label: "Переместить в архив", danger: true },
     ];
-  }, [workOrderActionsModal, rows]);
+  }, [workOrderActionsModal, rows, selectedRowIds, archiveOnly]);
 
   function actionIconById(actionId: WorkOrderActionId, danger?: boolean) {
     const tone = danger ? "text-[#EC1C24]" : "text-[#4B5563]";
     if (actionId === "open") return <WorkOrderActionIconOpen className={tone} />;
+    if (actionId === "callClient") return <WorkOrderActionIconCall className={tone} />;
+    if (actionId === "status") return <WorkOrderActionIconStatus className={tone} />;
+    if (actionId === "switchMaster") return <WorkOrderActionIconSwitchMaster className={tone} />;
     if (actionId === "urgent") return <WorkOrderActionIconUrgent className={tone} />;
     if (actionId === "edit") return <WorkOrderActionIconEdit className={tone} />;
     return <WorkOrderActionIconArchive className={tone} />;
   }
 
-  function handleWorkOrderModalAction(actionId: WorkOrderActionId) {
+  async function handleWorkOrderModalAction(actionId: WorkOrderActionId) {
     if (!workOrderActionsModal) return;
+    const isBulkAction = selectedRowIds.size > 1;
+    const targetIds = isBulkAction ? Array.from(selectedRowIds) : [workOrderActionsModal.id];
     if (actionId === "open") {
+      navigate(`/work-orders/${workOrderActionsModal.id}`);
+      setWorkOrderActionsModal(null);
+      return;
+    }
+    if (actionId === "callClient") {
+      const normalizedRowClient = normalizeRuFio(workOrderActionsModal.client);
+      const clientPhone =
+        clientDirectory.find((entry) => normalizeRuFio(entry.fullName) === normalizedRowClient)?.phone ??
+        "";
+      const digits = clientPhone.replace(/\D/g, "");
+      if (digits.length < 10) {
+        emitArchiveStyleToast({
+          line1: "Нет номера для звонка",
+          line2: "У этого клиента номер не найден",
+        });
+        setWorkOrderActionsModal(null);
+        return;
+      }
+      const callLink = document.createElement("a");
+      callLink.href = toTelHref(clientPhone);
+      document.body.appendChild(callLink);
+      callLink.click();
+      document.body.removeChild(callLink);
+      setWorkOrderActionsModal(null);
+      return;
+    }
+    if (actionId === "status") {
+      setWorkOrderStatusPickerIds(targetIds);
+      setWorkOrderActionsModal(null);
+      return;
+    }
+    if (actionId === "switchMaster") {
+      const current = rows.find((row) => row.id === workOrderActionsModal.id) ?? workOrderActionsModal;
+      setSwitchMasterSelection(current.master);
+      setSwitchMasterTargetId(current.id);
+      setSwitchMasterModalOpen(true);
       setWorkOrderActionsModal(null);
       return;
     }
     if (actionId === "urgent") {
-      setRows((prev) =>
-        prev.map((row) =>
-          row.id === workOrderActionsModal.id ? { ...row, urgent: !row.urgent } : row,
-        ),
-      );
+      if (isWorkOrdersRemoteEnabled()) {
+        try {
+          if (isBulkAction) {
+            await updateWorkOrdersStorageRows(targetIds, { urgent: true });
+          } else {
+            const currentRow = rows.find((row) => row.id === workOrderActionsModal.id) ?? workOrderActionsModal;
+            const nextUrgent = !Boolean(currentRow.urgent);
+            await updateWorkOrdersStorageRows([currentRow.id], { urgent: nextUrgent });
+          }
+        } catch (error) {
+          console.warn("Failed to update urgent flag in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: "Не удалось изменить срочность",
+            line2: "Проверьте подключение к базе и policy update",
+          });
+          setWorkOrderActionsModal(null);
+          return;
+        }
+      }
+      if (isBulkAction) {
+        setRows((prev) => prev.map((row) => (targetIds.includes(row.id) ? { ...row, urgent: true } : row)));
+      } else {
+        setRows((prev) =>
+          prev.map((row) =>
+            row.id === workOrderActionsModal.id ? { ...row, urgent: !row.urgent } : row,
+          ),
+        );
+      }
     }
     if (actionId === "archive") {
-      const archivedRowId = workOrderActionsModal.id;
-      const archivedClient = workOrderActionsModal.client;
-      setRows((prev) =>
-        prev.map((row) =>
-          row.id === archivedRowId ? { ...row, archived: true } : row,
-        ),
-      );
-      setSelectedRowIds((prev) => {
-        const next = new Set(prev);
-        next.delete(archivedRowId);
-        return next;
-      });
-      emitArchiveStyleToast({
-        line1: `Заказ-наряд № ${archivedRowId} (${archivedClient})`,
-        line2: "перемещен в архив",
-      });
+      const isRestoreAction = archiveOnly || targetIds.every((id) => Boolean((rows.find((r) => r.id === id) ?? workOrderActionsModal)?.archived));
+      if (isWorkOrdersRemoteEnabled()) {
+        try {
+          await updateWorkOrdersStorageRows(targetIds, { archived: isRestoreAction ? false : true });
+        } catch (error) {
+          console.warn("Failed to update work orders archive flag in Supabase.", error);
+          emitArchiveStyleToast({
+            line1: isRestoreAction ? "Не удалось вернуть в таблицу" : "Не удалось переместить в архив",
+            line2: "Проверьте подключение к базе и policy update",
+          });
+          setWorkOrderActionsModal(null);
+          return;
+        }
+      }
+      if (isRestoreAction) {
+        if (isBulkAction) {
+          setRows((prev) => prev.map((row) => (targetIds.includes(row.id) ? { ...row, archived: false } : row)));
+          setSelectedRowIds(new Set());
+          emitArchiveStyleToast({
+            line1: `${targetIds.length} заказ-нарядов`,
+            line2: "возвращены в таблицу",
+          });
+        } else {
+          const restoredRowId = workOrderActionsModal.id;
+          const restoredClient = workOrderActionsModal.client;
+          setArchivingRowId(restoredRowId);
+          window.setTimeout(() => {
+            setRows((prev) =>
+              prev.map((row) =>
+                row.id === restoredRowId ? { ...row, archived: false } : row,
+              ),
+            );
+            setSelectedRowIds((prev) => {
+              const next = new Set(prev);
+              next.delete(restoredRowId);
+              return next;
+            });
+            setArchivingRowId((current) => (current === restoredRowId ? null : current));
+            if (typeof window !== "undefined") {
+              window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, restoredRowId);
+            }
+            emitArchiveStyleToast({
+              line1: `Заказ-наряд № ${restoredRowId} (${restoredClient})`,
+              line2: "возвращен в таблицу",
+              navigateTo: `/work-orders?workOrder=${encodeURIComponent(restoredRowId)}`,
+            });
+          }, 260);
+        }
+      } else if (isBulkAction) {
+        setRows((prev) => prev.map((row) => (targetIds.includes(row.id) ? { ...row, archived: true } : row)));
+        setSelectedRowIds(new Set());
+        emitArchiveStyleToast({
+          line1: `${targetIds.length} заказ-нарядов`,
+          line2: "перемещены в архив",
+        });
+      } else {
+        const archivedRowId = workOrderActionsModal.id;
+        const archivedClient = workOrderActionsModal.client;
+        setArchivingRowId(archivedRowId);
+        window.setTimeout(() => {
+          setRows((prev) =>
+            prev.map((row) =>
+              row.id === archivedRowId ? { ...row, archived: true } : row,
+            ),
+          );
+          setSelectedRowIds((prev) => {
+            const next = new Set(prev);
+            next.delete(archivedRowId);
+            return next;
+          });
+          setArchivingRowId((current) => (current === archivedRowId ? null : current));
+            if (typeof window !== "undefined") {
+              window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, archivedRowId);
+            }
+          emitArchiveStyleToast({
+            line1: `Заказ-наряд № ${archivedRowId} (${archivedClient})`,
+            line2: "перемещен в архив",
+              navigateTo: `/work-orders?workOrder=${encodeURIComponent(archivedRowId)}&archive=1`,
+          });
+        }, 260);
+      }
     }
     if (actionId === "edit") {
       const rowToEdit = rows.find((row) => row.id === workOrderActionsModal.id) ?? workOrderActionsModal;
@@ -516,16 +1587,59 @@ export function WorkOrdersPage() {
     setWorkOrderActionsModal(null);
   }
 
-  function commitWorkOrderEdit() {
+  async function commitWorkOrderStatus(status: WorkOrderRow["status"]) {
+    if (!workOrderStatusPickerIds || workOrderStatusPickerIds.length === 0) return;
+    const ids = new Set(workOrderStatusPickerIds);
+    if (isWorkOrdersRemoteEnabled()) {
+      try {
+        await updateWorkOrdersStorageRows(Array.from(ids), { status });
+      } catch (error) {
+        console.warn("Failed to update work order status in Supabase.", error);
+        emitArchiveStyleToast({
+          line1: "Не удалось изменить статус",
+          line2: "Проверьте подключение к базе и policy update",
+        });
+        setWorkOrderStatusPickerIds(null);
+        return;
+      }
+    }
+    setRows((prev) => prev.map((row) => (ids.has(row.id) ? { ...row, status } : row)));
+    setWorkOrderStatusPickerIds(null);
+  }
+
+  async function commitWorkOrderEdit() {
     if (!editWorkOrderId || !editWorkOrderDraft) return;
+    const targetId = editWorkOrderId;
+    const nextClient = editWorkOrderDraft.client.trim();
+    const nextCar = editWorkOrderDraft.car.trim();
+    const nextPlate = editWorkOrderDraft.plate.trim();
+    if (isWorkOrdersRemoteEnabled()) {
+      try {
+        const current = rows.find((row) => row.id === targetId);
+        await updateWorkOrdersStorageRows([targetId], {
+          client: nextClient || current?.client || "",
+          car: nextCar || current?.car || "",
+          plate: nextPlate || current?.plate || "",
+        });
+      } catch (error) {
+        console.warn("Failed to edit work order in Supabase.", error);
+        emitArchiveStyleToast({
+          line1: "Не удалось сохранить изменения",
+          line2: "Проверьте подключение к базе и policy update",
+        });
+        setEditWorkOrderId(null);
+        setEditWorkOrderDraft(null);
+        return;
+      }
+    }
     setRows((prev) =>
       prev.map((row) =>
-        row.id === editWorkOrderId
+        row.id === targetId
           ? {
               ...row,
-              client: editWorkOrderDraft.client.trim() || row.client,
-              car: editWorkOrderDraft.car.trim() || row.car,
-              plate: editWorkOrderDraft.plate.trim() || row.plate,
+              client: nextClient || row.client,
+              car: nextCar || row.car,
+              plate: nextPlate || row.plate,
             }
           : row,
       ),
@@ -534,7 +1648,9 @@ export function WorkOrdersPage() {
     setEditWorkOrderDraft(null);
   }
 
-  const noActiveFilters = !searchQuery.trim() && !awaitingPaymentOnly && !archiveOnly && !delayOnly && !dateFromInput.trim() && !dateToInput.trim();
+  const noActiveFilters = !searchQuery.trim() && !awaitingPaymentOnly && !archiveOnly && !dateFromInput.trim() && !dateToInput.trim();
+  const switchMasterTargetRow = switchMasterTargetId ? rows.find((row) => row.id === switchMasterTargetId) ?? null : null;
+  const switchMasterOptions = [...new Set(rows.map((row) => row.master).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
 
   return (
     <div className="h-screen w-screen overflow-hidden bg-black">
@@ -542,7 +1658,6 @@ export function WorkOrdersPage() {
         <div className="flex h-full w-full rounded-[16px] bg-black p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
           <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
             <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/dashboard")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="home" /></button>
             <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
             <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
             <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="chat" /></button>
@@ -570,14 +1685,14 @@ export function WorkOrdersPage() {
               <div className="flex items-center gap-3">
                 <div className="flex items-baseline gap-2">
                   <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Заказ-наряды</h1>
-                  <span className="text-[16px] font-medium tracking-[-0.04em] text-[#B4B4B6]">{workOrdersCountLabel}</span>
+                  <span className="text-[16px] font-bold tracking-[-0.04em] text-[#888888]">({workOrdersCount})</span>
                 </div>
                 <div className="ml-auto flex items-center gap-1.5">
                   <div className="relative">
                     <input
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-[#8A8A8A] outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
                       placeholder="Поиск по ID или ФИО..."
                       aria-label="Поиск по ID или ФИО..."
                     />
@@ -586,7 +1701,7 @@ export function WorkOrdersPage() {
                         type="button"
                         onClick={() => setSearchQuery("")}
                         aria-label="Очистить поиск"
-                        className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-[8px] text-[#7D7D7D] transition-colors hover:bg-black/5 hover:text-black"
+                        className="absolute right-1.5 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 cursor-pointer items-center justify-center rounded-[8px] text-black"
                       >
                         <svg viewBox="0 0 16 16" fill="none" className="h-[16px] w-[16px]" aria-hidden>
                           <path d="M4 4L12 12M12 4L4 12" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
@@ -596,7 +1711,8 @@ export function WorkOrdersPage() {
                   </div>
                   <button
                     type="button"
-                    className="h-12 rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
+                    onClick={() => setCreateOrderModalOpen(true)}
+                    className="h-12 cursor-pointer rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
                   >
                     Создать заказ-наряд
                   </button>
@@ -656,7 +1772,7 @@ export function WorkOrdersPage() {
                                 })
                               }
                             >
-                              {checkboxBox(statusFilter.has(s))}
+                              {workOrdersCheckboxBox(statusFilter.has(s))}
                               {s}
                             </span>
                           ))}
@@ -678,7 +1794,7 @@ export function WorkOrdersPage() {
                                 })
                               }
                             >
-                              {checkboxBox(masterFilter.has(m))}
+                              {workOrdersCheckboxBox(masterFilter.has(m))}
                               {m}
                             </span>
                           ))}
@@ -705,7 +1821,7 @@ export function WorkOrdersPage() {
                                 role="checkbox"
                                 aria-checked={datePreset === preset}
                               >
-                                {checkboxBox(datePreset === preset)}
+                                {workOrdersCheckboxBox(datePreset === preset)}
                                 {label}
                               </span>
                             ))}
@@ -721,7 +1837,7 @@ export function WorkOrdersPage() {
                               role="checkbox"
                               aria-checked={datePreset === "custom"}
                             >
-                              {checkboxBox(datePreset === "custom")}
+                              {workOrdersCheckboxBox(datePreset === "custom")}
                               Свой диапазон
                             </span>
                           </div>
@@ -757,45 +1873,30 @@ export function WorkOrdersPage() {
                     <span
                       className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]"
                       onClick={() => {
-                        setDelayOnly((v) => {
-                          const next = !v;
-                          setAwaitingPaymentOnly(false);
-                          setArchiveOnly(false);
-                          return next;
-                        });
-                      }}
-                    >
-                      {checkboxBox(delayOnly)}
-                      <span className="text-black">Задержка </span>
-                      <span className="text-[#7D7D7D] tabular-nums">({delayCount})</span>
-                    </span>
-                    <span
-                      className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]"
-                      onClick={() => {
+                        clearWorkOrderFlashState();
                         setAwaitingPaymentOnly((v) => {
                           const next = !v;
-                          setDelayOnly(false);
                           setArchiveOnly(false);
                           return next;
                         });
                       }}
                     >
-                      {checkboxBox(awaitingPaymentOnly)}
+                      {workOrdersCheckboxBox(awaitingPaymentOnly)}
                       <span className="text-black">Готово к выдаче </span>
                       <span className="text-[#7D7D7D] tabular-nums">({awaitingPaymentCount})</span>
                     </span>
                     <span
                       className="flex shrink-0 cursor-pointer select-none items-center gap-2 text-[16px] font-medium tracking-[-0.04em]"
                       onClick={() => {
+                        clearWorkOrderFlashState();
                         setArchiveOnly((v) => {
                           const next = !v;
-                          setDelayOnly(false);
                           setAwaitingPaymentOnly(false);
                           return next;
                         });
                       }}
                     >
-                      {checkboxBox(archiveOnly)}
+                      {workOrdersCheckboxBox(archiveOnly)}
                       <span className="text-black">Архив </span>
                       <span className="text-[#7D7D7D] tabular-nums">({archiveCount})</span>
                     </span>
@@ -830,7 +1931,7 @@ export function WorkOrdersPage() {
                       <tr>
                         <th className="rounded-l-[5px] px-4 py-2.5 font-medium">
                           <button type="button" onClick={toggleSelectAllOnPage} className="inline-flex cursor-pointer items-center">
-                            {checkboxBox(allPageRowsSelected)}
+                            {workOrdersCheckboxBox(allPageRowsSelected)}
                           </button>
                         </th>
                         <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">ID<button type="button" onClick={() => toggleSort("id")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
@@ -845,80 +1946,39 @@ export function WorkOrdersPage() {
                       </tr>
                     </thead>
                     <tbody>
-                      {pagedRows.map((row, index) => {
-                        const isSelected = selectedRowIds.has(row.id);
-                        const isHighlighted = highlightWorkOrderId === row.id;
-                        return (
-                        <tr
-                          key={row.id}
-                          ref={(el) => {
-                            workOrderRowRefs.current[row.id] = el;
-                          }}
-                          onClick={() => navigate(`/work-orders/${row.id}`)}
-                          className={`border-[5px] border-[#EEEDF0] transition ${
-                            isSelected
-                              ? "bg-[rgba(224,9,25,0.10)]"
-                              : `${index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"} hover:bg-[rgba(224,9,25,0.10)]`
-                          }`}
-                          style={isHighlighted ? { animation: "workOrderHighlightBorder 4s ease-out" } : undefined}
-                        >
-                          <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                            <span
-                              className="inline-flex cursor-pointer select-none items-center"
-                              role="checkbox"
-                              aria-checked={selectedRowIds.has(row.id)}
-                              aria-label={`Выбрать заказ-наряд ${row.id}`}
-                              onClick={() => toggleRowSelection(row.id)}
-                            >
-                              {checkboxBox(selectedRowIds.has(row.id))}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-black">
-                            <span className="inline-flex items-center gap-1.5">
-                              {row.urgent ? <span aria-label="Срочный заказ-наряд">🔥</span> : null}
-                              <span>{row.id}</span>
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-black">{row.client}</td>
-                          <td className="px-4 py-3 text-black">{row.car}</td>
-                          <td className="px-4 py-3 text-black">{row.plate}</td>
-                          <td className="px-4 py-3 font-medium">
-                            <span className="inline-flex max-w-full items-center gap-2 text-black">
-                              <span
-                                className="h-2.5 w-2.5 shrink-0 rounded-full"
-                                style={{ backgroundColor: workOrderStatusColorMap[row.status] }}
-                              />
-                              <span className="min-w-0 truncate text-[16px] font-medium text-black">{row.status}</span>
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-black">
-                            <span className="inline-flex max-w-full items-center gap-1.5">
-                              <img
-                                src={row.masterPhoto}
-                                alt=""
-                                className="h-[1em] w-[1em] shrink-0 rounded-full object-cover ring-1 ring-black/10"
-                              />
-                              <span className="min-w-0 truncate">{row.master}</span>
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-black">{row.dueDate}</td>
-                          <td className="px-4 py-3 text-black">{row.amount}</td>
-                          <td className="px-4 py-3 text-center text-[#A0A0A0]">
-                            <button
-                              type="button"
-                              className="cursor-pointer text-[#A0A0A0]"
-                              aria-label={`Действия для заказ-наряда ${row.id}`}
-                              aria-expanded={workOrderActionsModal?.id === row.id}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setWorkOrderActionsModal(row);
-                              }}
-                            >
-                              ...
-                            </button>
+                      {sortedRows.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={10}
+                            className="px-4 py-16 text-center text-[18px] font-medium tracking-[-0.04em] text-[#7D7D7D] whitespace-normal"
+                          >
+                            Ничего не найдено
                           </td>
                         </tr>
-                      )})}
+                      ) : (
+                        pagedRows.map((row, index) => {
+                          const isSelected = selectedRowIds.has(row.id);
+                          return (
+                            <WorkOrdersTableDataRow
+                              key={row.id}
+                              row={row}
+                              index={index}
+                              isSelected={isSelected}
+                              isArchiving={archivingRowId === row.id}
+                              flashTargetId={flashHighlightWorkOrderId}
+                              flashNonce={flashHighlightNonce}
+                              rowRef={(el) => {
+                                workOrderRowRefs.current[row.id] = el;
+                              }}
+                              onRowNavigate={() => navigate(`/work-orders/${row.id}`)}
+                              onToggleSelect={() => toggleRowSelection(row.id)}
+                              onOpenActions={() => setWorkOrderActionsModal(row)}
+                              actionsModalOpenForThisRow={workOrderActionsModal?.id === row.id}
+                              onFlashAnimationEnd={onWorkOrderFlashAnimationEnd}
+                            />
+                          );
+                        })
+                      )}
                     </tbody>
                   </table>
                 </div>
@@ -967,6 +2027,629 @@ export function WorkOrdersPage() {
           </main>
         </div>
       </div>
+      {createOrderModalMounted && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className={`fixed inset-0 z-[291] bg-black/35 transition-[opacity] ${createOrderModalActive ? "opacity-100" : "opacity-0"}`}
+              style={{ transitionDuration: "400ms", transitionTimingFunction: "cubic-bezier(0.45, 0, 0.55, 1)" }}
+              role="presentation"
+              onClick={closeCreateOrderModal}
+            >
+              <div className="ml-auto flex h-full max-h-screen justify-end" onClick={(e) => e.stopPropagation()}>
+                <div
+                  className="relative flex h-full shrink-0"
+                  style={{
+                    transform: createOrderModalActive ? "translate3d(0, 0, 0)" : "translate3d(100%, 0, 0)",
+                    transition: "transform 480ms cubic-bezier(0.45, 0, 0.55, 1)",
+                    willChange: "transform",
+                    backfaceVisibility: "hidden",
+                    WebkitBackfaceVisibility: "hidden",
+                  }}
+                  onTransitionEnd={handleCreateOrderDrawerTransitionEnd}
+                >
+                  <button
+                    type="button"
+                    onClick={closeCreateOrderModal}
+                    className="absolute right-full top-8 z-10 mr-3 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#E8E8E8] bg-white text-[#111111] shadow-[0_8px_24px_-4px_rgba(0,0,0,0.18)] transition hover:bg-[#F7F7F7]"
+                    aria-label="Закрыть модалку создания заказ-наряда"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden>
+                      <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                  <aside
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="create-work-order-title"
+                    className="flex h-full w-[min(900px,58vw)] min-w-[380px] max-w-[min(1040px,calc(100vw-48px))] flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)]"
+                  >
+                    <div className="border-b border-[#EEEDF0] px-6 py-5">
+                      <h2 id="create-work-order-title" className="text-[32px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">
+                        Создать заказ-наряд
+                      </h2>
+                      <p className="mt-2 text-[15px] font-medium text-[#6F7785]">Шаг {createOrderStep} из 4</p>
+                    </div>
+
+                    <div className="hide-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+                      {createOrderStep === 1 ? (
+                        <div className="space-y-4">
+                          <label className="block">
+                            <span className="mb-2 block text-[14px] font-medium text-[#5A6472]">Телефон</span>
+                            <input
+                              type="tel"
+                              autoComplete="tel"
+                              inputMode="numeric"
+                              value={maskRuPhoneInput(createOrderPhoneNational10)}
+                              onChange={(e) => setCreateOrderPhoneNational10(national10FromPhoneInput(e.target.value))}
+                              placeholder="+7 (999) 000-00-00"
+                              className="mt-1.5 h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            />
+                          </label>
+
+                          {createOrderPhoneMatch ? (
+                            <div className="rounded-[12px] border border-[#E4E5E7] bg-[#F8F8FA] p-4">
+                              <p className="text-[14px] font-medium text-[#6F7785]">Клиент найден</p>
+                              <p className="mt-1 text-[18px] font-semibold text-[#111826]">{createOrderPhoneMatch.fullName}</p>
+                              <p className="mt-1 text-[15px] text-[#4A4F59]">{createOrderPhoneMatch.phone}</p>
+                              <div className="mt-3 rounded-[10px] bg-white px-3 py-2">
+                                <p className="text-[15px] font-medium text-[#111826]">{firstClientCar(createOrderPhoneMatch).car}</p>
+                                <p className="text-[13px] text-[#7D7D7D]">{firstClientCar(createOrderPhoneMatch).plate}</p>
+                              </div>
+                            </div>
+                          ) : createOrderPhoneNational10.length === 10 ? (
+                            <div className="space-y-4 rounded-[12px] bg-[#F8F8FA] p-4">
+                              <p className="text-[14px] font-medium text-black">Клиент с таким номером не найден</p>
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setCreateOrderMode("existing")}
+                                  className={`h-11 rounded-[10px] px-5 text-[15px] font-medium ${
+                                    createOrderMode === "existing" ? "bg-[#EC1C24] text-white" : "bg-[#ECECEF] text-black"
+                                  }`}
+                                >
+                                  Привязать к существующему
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCreateOrderMode("new");
+                                    setCreateOrderNewClientPhoneNational10(createOrderPhoneNational10);
+                                  }}
+                                  className={`h-11 rounded-[10px] px-5 text-[15px] font-medium ${
+                                    createOrderMode === "new" ? "bg-[#EC1C24] text-white" : "bg-[#ECECEF] text-black"
+                                  }`}
+                                >
+                                  Новый клиент
+                                </button>
+                              </div>
+
+                              {createOrderMode === "existing" ? (
+                                <div className="space-y-3">
+                                  <input
+                                    value={createOrderExistingSurname}
+                                    onChange={(e) => setCreateOrderExistingSurname(e.target.value)}
+                                    placeholder="Фамилия"
+                                    className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                                  />
+                                  <div className="space-y-2">
+                                    {createOrderSurnameCandidates.map((client) => (
+                                      <div key={`${client.fullName}-${client.phone}`} className="rounded-[10px] bg-[#ECECEF] p-3">
+                                        <p className="text-[15px] font-semibold text-[#111826]">{client.fullName}</p>
+                                        <p className="mt-0.5 text-[14px] text-[#5A6472]">{client.phone}</p>
+                                        <div className="mt-3 flex flex-wrap gap-2">
+                                          {client.cars.map((carEntry) => {
+                                            const selected =
+                                              createOrderExistingClient?.fullName === client.fullName &&
+                                              createOrderExistingCar?.car === carEntry.car &&
+                                              createOrderExistingCar?.plate === carEntry.plate;
+                                            return (
+                                              <button
+                                                key={`${client.fullName}-${carEntry.car}-${carEntry.plate}`}
+                                                type="button"
+                                                onClick={() => {
+                                                  setCreateOrderExistingClient(client);
+                                                  setCreateOrderExistingCar(carEntry);
+                                                }}
+                                                className={`rounded-lg px-3 py-2 text-left text-[13px] font-medium ${
+                                                  selected ? "bg-[#EC1C24] text-white" : "bg-white text-[#3B4656]"
+                                                }`}
+                                              >
+                                                {carEntry.car}
+                                                <span className={`block text-[12px] font-normal ${selected ? "text-white/90" : "text-[#6D788A]"}`}>
+                                                  {carEntry.plate || "—"}
+                                                </span>
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </div>
+                                    ))}
+                                    {createOrderExistingSurname.trim() && createOrderSurnameCandidates.length === 0 ? (
+                                      <div className="flex h-11 items-center rounded-[10px] bg-black px-5 text-[15px] font-medium text-white">
+                                        По фамилии ничего не найдено.
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              {createOrderMode === "new" ? (
+                                <div className="space-y-3">
+                                  <input
+                                    value={createOrderNewClientName}
+                                    onChange={(e) => setCreateOrderNewClientName(e.target.value)}
+                                    placeholder="ФИО"
+                                    className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                                  />
+                                  <input
+                                    type="tel"
+                                    autoComplete="tel"
+                                    inputMode="numeric"
+                                    value={maskRuPhoneInput(createOrderNewClientPhoneNational10)}
+                                    onChange={(e) => setCreateOrderNewClientPhoneNational10(national10FromPhoneInput(e.target.value))}
+                                    placeholder="+7 (999) 000-00-00"
+                                    className="mt-1.5 h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                                  />
+                                  <input
+                                    value={createOrderNewClientCar}
+                                    onChange={(e) => setCreateOrderNewClientCar(e.target.value)}
+                                    placeholder="Автомобиль"
+                                    className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                                  />
+                                  <input
+                                    value={createOrderNewClientPlate}
+                                    onChange={(e) => setCreateOrderNewClientPlate(e.target.value)}
+                                    placeholder="Гос. номер"
+                                    className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                                  />
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {createOrderStep === 2 ? (
+                        <div className="space-y-4">
+                          <input
+                            value={createOrderCatalogQuery}
+                            onChange={(e) => setCreateOrderCatalogQuery(e.target.value)}
+                            placeholder="Поиск работы из справочника..."
+                            className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[16px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5]"
+                          />
+                          <div>
+                            <div className="mb-5 flex flex-wrap gap-2 pb-1">
+                              {workCatalogSections.map((section) => (
+                                <button
+                                  key={section.label}
+                                  type="button"
+                                  onClick={() => setCreateOrderWorkCategory(section.label)}
+                                  className={`shrink-0 rounded-[10px] px-3 py-2 text-[13px] font-medium tracking-[-0.02em] ${
+                                    createOrderWorkCategory === section.label ? "bg-[#EC1C24] text-white" : "bg-[#ECECEF] text-[#111826]"
+                                  }`}
+                                >
+                                  {section.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="h-[504px] space-y-2 overflow-y-auto">
+                              {createOrderCatalogItems.map((item) => {
+                                const selected = createOrderSelectedWorks.has(item.title);
+                                return (
+                                  <button
+                                    key={item.title}
+                                    type="button"
+                                    onClick={() =>
+                                      setCreateOrderSelectedWorks((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(item.title)) next.delete(item.title);
+                                        else next.add(item.title);
+                                        return next;
+                                      })
+                                    }
+                                    className={`flex min-h-[56px] w-full cursor-pointer items-center justify-between rounded-[10px] px-3 py-3 text-left text-[15px] font-medium transition-colors ${
+                                      selected ? "bg-[#EC1C24] text-white" : "bg-[#F3F3F5] text-[#111826] hover:bg-[#EBECF0]"
+                                    }`}
+                                  >
+                                    <span>{item.title}</span>
+                                    <span>{item.price.toLocaleString("ru-RU")} ₽</span>
+                                  </button>
+                                );
+                              })}
+                              {createOrderCatalogItems.length === 0 ? (
+                                <div className="flex h-11 items-center rounded-[10px] bg-black px-5 text-[15px] font-medium text-white">
+                                  Ничего не найдено.
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {createOrderStep === 3 ? (
+                        <div className="space-y-4">
+                          <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Выберите мастера</h3>
+                          <div className="max-h-[540px] space-y-2 overflow-y-auto pr-1">
+                            {createOrderMasterOptions.map((masterName) => {
+                              const selected = createOrderSelectedMaster === masterName;
+                              return (
+                                <button
+                                  key={masterName}
+                                  type="button"
+                                  onClick={() => setCreateOrderSelectedMaster(masterName)}
+                                  className={`flex min-h-[56px] w-full cursor-pointer items-center gap-3 rounded-[10px] px-3 py-3 text-left text-[16px] font-medium transition-colors ${
+                                    selected ? "bg-[#EC1C24] text-white" : "bg-[#F3F3F5] text-[#111826] hover:bg-[#EBECF0]"
+                                  }`}
+                                >
+                                  <span className="inline-flex h-9 w-9 shrink-0 overflow-hidden rounded-full bg-[#E8E8EC]">
+                                    <img
+                                      src={masterPhotoByName[masterName] ?? "https://i.pravatar.cc/80"}
+                                      alt={masterName}
+                                      className="h-full w-full object-cover"
+                                    />
+                                  </span>
+                                  <span className="min-w-0 flex-1 truncate">{masterName}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {createOrderStep === 4 ? (
+                        <div className="space-y-[50px]">
+                          <div>
+                            <h3 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
+                              <span className="block whitespace-nowrap">{createOrderClientNameLines.firstLine}</span>
+                              {createOrderClientNameLines.secondLine ? (
+                                <span className="block">{createOrderClientNameLines.secondLine}</span>
+                              ) : null}
+                            </h3>
+                            <p className="mt-4 text-[20px] font-medium tracking-[-0.02em] text-[#3C4352]">
+                              Мастер: {createOrderSelectedMaster ?? rows[0]?.master ?? "—"}
+                            </p>
+                            <div className="mt-[50px] grid grid-cols-2 gap-x-3 gap-y-4">
+                              <div className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">Телефон</p>
+                                <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">
+                                  {createOrderResolvedClient?.phone || "—"}
+                                </p>
+                              </div>
+                              <div className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">Автомобиль</p>
+                                <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">
+                                  {createOrderResolvedClient?.car || "—"}
+                                </p>
+                              </div>
+                              <div className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">Гос. номер</p>
+                                <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">
+                                  {createOrderResolvedClient?.plate || "—"}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div>
+                            <h3 className="mb-3 text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
+                              Работы <span className="text-[#888888]">({createOrderSelectedWorkItems.length})</span>
+                            </h3>
+                            <ul className="max-h-[184px] space-y-2 overflow-y-auto pr-1">
+                              {createOrderSelectedWorkItems.map((item) => (
+                                <li key={item.title} className="flex min-h-[56px] w-full items-center justify-between rounded-[10px] bg-[#F3F3F5] px-3 py-3 text-left text-[15px] font-medium text-[#111826]">
+                                  <span>{item.title}</span>
+                                  <span>{item.price.toLocaleString("ru-RU")} ₽</span>
+                                </li>
+                              ))}
+                            </ul>
+                            <p className="mt-[50px] text-[32px] font-medium leading-none tracking-[-0.04em] text-black">
+                              Итого: {formatRub(createOrderTotalAmount)}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-[#EEEDF0] px-6 py-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (createOrderStep === 1) closeCreateOrderModal();
+                          else setCreateOrderStep((prev) => (prev === 4 ? 3 : prev === 3 ? 2 : 1));
+                        }}
+                        className="h-11 cursor-pointer rounded-[10px] bg-[#ECECEF] px-4 text-[15px] font-medium text-black"
+                      >
+                        {createOrderStep === 1 ? "Отмена" : "Назад"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          (createOrderStep === 1 && !canGoToCreateOrderStep2) ||
+                          (createOrderStep === 2 && createOrderSelectedWorks.size === 0) ||
+                          (createOrderStep === 3 && !createOrderSelectedMaster)
+                        }
+                        onClick={() => {
+                          if (createOrderStep === 1) setCreateOrderStep(2);
+                          else if (createOrderStep === 2) setCreateOrderStep(3);
+                          else if (createOrderStep === 3) setCreateOrderStep(4);
+                          else commitCreatedWorkOrder();
+                        }}
+                        className="h-11 cursor-pointer rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {createOrderStep === 4 ? "Подтвердить" : "Далее"}
+                      </button>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {transferOrderModalMounted && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className={`fixed inset-0 z-[291] bg-black/35 transition-[opacity] ${transferOrderModalActive ? "opacity-100" : "opacity-0"}`}
+              style={{ transitionDuration: "400ms", transitionTimingFunction: "cubic-bezier(0.45, 0, 0.55, 1)" }}
+              role="presentation"
+              onClick={closeTransferOrderModal}
+            >
+              <div className="ml-auto flex h-full max-h-screen justify-end" onClick={(e) => e.stopPropagation()}>
+                <div
+                  className="relative flex h-full shrink-0"
+                  style={{
+                    transform: transferOrderModalActive ? "translate3d(0, 0, 0)" : "translate3d(100%, 0, 0)",
+                    transition: "transform 480ms cubic-bezier(0.45, 0, 0.55, 1)",
+                    willChange: "transform",
+                    backfaceVisibility: "hidden",
+                    WebkitBackfaceVisibility: "hidden",
+                  }}
+                  onTransitionEnd={handleTransferOrderDrawerTransitionEnd}
+                >
+                  <button
+                    type="button"
+                    onClick={closeTransferOrderModal}
+                    className="absolute right-full top-8 z-10 mr-3 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#E8E8E8] bg-white text-[#111111] shadow-[0_8px_24px_-4px_rgba(0,0,0,0.18)] transition hover:bg-[#F7F7F7]"
+                    aria-label="Закрыть модалку переноса в заказ-наряд"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden>
+                      <path d="M6 6L18 18M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                    </svg>
+                  </button>
+                  <aside
+                    role="dialog"
+                    aria-modal="true"
+                    aria-labelledby="transfer-work-order-title"
+                    className="flex h-full w-[min(900px,58vw)] min-w-[380px] max-w-[min(1040px,calc(100vw-48px))] flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)]"
+                  >
+                    <div className="border-b border-[#EEEDF0] px-6 py-5">
+                      <h2 id="transfer-work-order-title" className="text-[32px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">
+                        Перенести в заказ-наряд
+                      </h2>
+                      <p className="mt-2 text-[15px] font-medium text-[#6F7785]">Шаг {transferOrderStep} из 3</p>
+                    </div>
+
+                    <div className="hide-scrollbar min-h-0 flex-1 space-y-5 overflow-y-auto px-6 py-5">
+                      {transferOrderStep === 2 ? (
+                        <div className="space-y-4">
+                          <input
+                            value={transferOrderCatalogQuery}
+                            onChange={(e) => setTransferOrderCatalogQuery(e.target.value)}
+                            placeholder="Поиск работы из справочника..."
+                            className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[16px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5]"
+                          />
+                          <div>
+                            <div className="mb-5 flex flex-wrap gap-2 pb-1">
+                              {workCatalogSections.map((section) => (
+                                <button
+                                  key={section.label}
+                                  type="button"
+                                  onClick={() => setTransferOrderWorkCategory(section.label)}
+                                  className={`shrink-0 rounded-[10px] px-3 py-2 text-[13px] font-medium tracking-[-0.02em] ${
+                                    transferOrderWorkCategory === section.label ? "bg-[#EC1C24] text-white" : "bg-[#ECECEF] text-[#111826]"
+                                  }`}
+                                >
+                                  {section.label}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="h-[504px] space-y-2 overflow-y-auto">
+                              {transferOrderCatalogItems.map((item) => {
+                                const selected = transferOrderSelectedWorks.has(item.title);
+                                return (
+                                  <button
+                                    key={item.title}
+                                    type="button"
+                                    onClick={() =>
+                                      setTransferOrderSelectedWorks((prev) => {
+                                        const next = new Set(prev);
+                                        if (next.has(item.title)) next.delete(item.title);
+                                        else next.add(item.title);
+                                        return next;
+                                      })
+                                    }
+                                    className={`flex min-h-[56px] w-full cursor-pointer items-center justify-between rounded-[10px] px-3 py-3 text-left text-[15px] font-medium transition-colors ${
+                                      selected ? "bg-[#EC1C24] text-white" : "bg-[#F3F3F5] text-[#111826] hover:bg-[#EBECF0]"
+                                    }`}
+                                  >
+                                    <span>{item.title}</span>
+                                    <span>{item.price.toLocaleString("ru-RU")} ₽</span>
+                                  </button>
+                                );
+                              })}
+                              {transferOrderCatalogItems.length === 0 ? (
+                                <div className="flex h-11 items-center rounded-[10px] bg-black px-5 text-[15px] font-medium text-white">
+                                  Ничего не найдено.
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {transferOrderStep === 21 ? (
+                        <div className="space-y-4">
+                          <div className="rounded-[12px] bg-[#F8F8FA] p-4">
+                            <p className="text-[18px] font-semibold text-[#111826]">
+                              {transferOrderMissingField === "phone"
+                                ? "Не указан номер телефона"
+                                : transferOrderMissingField === "car"
+                                  ? "Не указан автомобиль клиента"
+                                  : "Не указан гос. номер"}
+                            </p>
+                            <p className="mt-1 text-[15px] font-medium text-[#4A4F59]">
+                              Пожалуйста заполните поле ввода
+                            </p>
+                          </div>
+                          {transferOrderMissingField === "phone" ? (
+                            <input
+                              type="tel"
+                              autoComplete="tel"
+                              inputMode="numeric"
+                              value={transferOrderClientPhone}
+                              onChange={(e) => setTransferOrderClientPhone(maskRuPhoneInput(national10FromPhoneInput(e.target.value)))}
+                              placeholder="+7 (999) 000-00-00"
+                              className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            />
+                          ) : null}
+                          {transferOrderMissingField === "car" ? (
+                            <input
+                              value={transferOrderClientCar}
+                              onChange={(e) => setTransferOrderClientCar(e.target.value)}
+                              placeholder="Автомобиль"
+                              className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            />
+                          ) : null}
+                          {transferOrderMissingField === "plate" ? (
+                            <input
+                              value={transferOrderClientPlate}
+                              onChange={(e) => setTransferOrderClientPlate(e.target.value)}
+                              placeholder="Гос. номер"
+                              className="h-12 w-full rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5]"
+                            />
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {transferOrderStep === 3 ? (
+                        <div className="space-y-[50px]">
+                          <div>
+                            <h3 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
+                              <span className="block whitespace-nowrap">{transferOrderClientNameLines.firstLine}</span>
+                              {transferOrderClientNameLines.secondLine ? (
+                                <span className="block">{transferOrderClientNameLines.secondLine}</span>
+                              ) : null}
+                            </h3>
+                            <div className="mt-[50px] grid grid-cols-2 gap-x-3 gap-y-4">
+                              <div className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">Телефон</p>
+                                <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">
+                                  {transferOrderClientPhone || "—"}
+                                </p>
+                              </div>
+                              <div className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">Автомобиль</p>
+                                <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">
+                                  {transferOrderClientCar || "—"}
+                                </p>
+                              </div>
+                              <div className="h-[68px] rounded-[10px] bg-[#F3F3F5] px-4 py-3">
+                                <p className="text-[11px] tracking-[0.04em] text-[#A4ABBA]">Гос. номер</p>
+                                <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">
+                                  {transferOrderClientPlate || "—"}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div>
+                            <h3 className="mb-3 text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
+                              Работы <span className="text-[#888888]">({transferOrderSelectedWorkItems.length})</span>
+                            </h3>
+                            <ul className="max-h-[248px] space-y-2 overflow-y-auto pr-1">
+                              {transferOrderSelectedWorkItems.map((item) => (
+                                <li key={item.title} className="flex min-h-[56px] w-full items-center justify-between rounded-[10px] bg-[#F3F3F5] px-3 py-3 text-left text-[15px] font-medium text-[#111826]">
+                                  <span>{item.title}</span>
+                                  <span>{item.price.toLocaleString("ru-RU")} ₽</span>
+                                </li>
+                              ))}
+                            </ul>
+                            <p className="mt-[50px] text-[32px] font-medium leading-none tracking-[-0.04em] text-black">
+                              Итого: {formatRub(transferOrderTotalAmount)}
+                            </p>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+
+                    <div className="flex items-center justify-between border-t border-[#EEEDF0] px-6 py-4">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (transferOrderStep === 2) closeTransferOrderModal();
+                          else if (transferOrderStep === 21) setTransferOrderStep(2);
+                          else setTransferOrderStep(2);
+                        }}
+                        className="h-11 rounded-[10px] bg-[#ECECEF] px-4 text-[15px] font-medium text-black"
+                      >
+                        Назад
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          (transferOrderStep === 2 && transferOrderSelectedWorks.size === 0) ||
+                          (transferOrderStep === 21 &&
+                            ((transferOrderMissingField === "phone" && !transferOrderClientPhone.trim()) ||
+                              (transferOrderMissingField === "car" && !transferOrderClientCar.trim()) ||
+                              (transferOrderMissingField === "plate" && !transferOrderClientPlate.trim())))
+                        }
+                        onClick={() => {
+                          if (transferOrderStep === 2) {
+                            if (!transferOrderClientPhone.trim()) {
+                              setTransferOrderMissingField("phone");
+                              setTransferOrderStep(21);
+                              return;
+                            }
+                            if (!transferOrderClientCar.trim()) {
+                              setTransferOrderMissingField("car");
+                              setTransferOrderStep(21);
+                              return;
+                            }
+                            if (!transferOrderClientPlate.trim()) {
+                              setTransferOrderMissingField("plate");
+                              setTransferOrderStep(21);
+                              return;
+                            }
+                            setTransferOrderStep(3);
+                          } else if (transferOrderStep === 21) {
+                            if (!transferOrderClientPhone.trim()) {
+                              setTransferOrderMissingField("phone");
+                              return;
+                            }
+                            if (!transferOrderClientCar.trim()) {
+                              setTransferOrderMissingField("car");
+                              return;
+                            }
+                            if (!transferOrderClientPlate.trim()) {
+                              setTransferOrderMissingField("plate");
+                              return;
+                            }
+                            setTransferOrderStep(3);
+                          }
+                          else commitTransferredWorkOrder();
+                        }}
+                        className="h-11 rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {transferOrderStep === 3 ? "Подтвердить" : "Далее"}
+                      </button>
+                    </div>
+                  </aside>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
       {workOrderActionsModal && typeof document !== "undefined"
         ? createPortal(
             <div
@@ -983,10 +2666,12 @@ export function WorkOrdersPage() {
               >
                 <div className="border-b border-[#EEEDF0] p-5">
                   <h2 id="work-order-actions-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
-                    Действия с заказ-нарядом
+                    {selectedRowIds.size > 1 ? "Действия с заказ-нарядами" : "Действия с заказ-нарядом"}
                   </h2>
                   <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
-                    № {workOrderActionsModal.id} · {workOrderActionsModal.client}
+                    {selectedRowIds.size > 1
+                      ? `${selectedRowIds.size} выбрано`
+                      : `№ ${workOrderActionsModal.id} · ${workOrderActionsModal.client}`}
                   </p>
                 </div>
                 <ul className="p-0">
@@ -1005,6 +2690,166 @@ export function WorkOrdersPage() {
                     </li>
                   ))}
                 </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {workOrderStatusPickerIds && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[261] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setWorkOrderStatusPickerIds(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="work-order-status-picker-title"
+                className="w-full max-w-[360px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="work-order-status-picker-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Изменить статус
+                  </h2>
+                  <p className="mt-1 truncate text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    {workOrderStatusPickerIds.length > 1 ? `${workOrderStatusPickerIds.length} выбрано` : `№ ${workOrderStatusPickerIds[0]}`}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  {(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"] as WorkOrderRow["status"][]).map((status) => (
+                    <li key={status}>
+                      <button
+                        type="button"
+                        className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                          workOrderStatusPickerIds.length === 1 &&
+                          (rows.find((r) => r.id === workOrderStatusPickerIds[0])?.status ?? null) === status
+                            ? "bg-[#F8F8FA] text-[#111826]"
+                            : "text-[#111826] hover:bg-[#F3F3F5]"
+                        }`}
+                        onClick={() => commitWorkOrderStatus(status)}
+                      >
+                        <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: workOrderStatusColorMap[status] }} />
+                        <span className="min-w-0 flex-1">{status}</span>
+                        {workOrderStatusPickerIds.length === 1 &&
+                        (rows.find((r) => r.id === workOrderStatusPickerIds[0])?.status ?? null) === status ? (
+                          <span className="shrink-0 text-[13px] font-medium text-[#7D7D7D]">Сейчас</span>
+                        ) : null}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <div className="border-t border-[#EEEDF0] p-5">
+                  <button
+                    type="button"
+                    onClick={() => setWorkOrderStatusPickerIds(null)}
+                    className="w-full cursor-pointer rounded-[10px] bg-[#ECECEF] p-4 text-center text-[16px] font-medium tracking-[-0.04em] text-[#111111] transition-colors hover:bg-[#E0E0E4]"
+                  >
+                    Отмена
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {switchMasterModalOpen && switchMasterTargetRow && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[262] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => {
+                setSwitchMasterModalOpen(false);
+                setSwitchMasterTargetId(null);
+              }}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="switch-master-title"
+                className="w-full max-w-[440px] overflow-hidden rounded-[14px] border border-[#E4E5E7] bg-white shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)]"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="border-b border-[#EEEDF0] p-5">
+                  <h2 id="switch-master-title" className="text-[18px] font-semibold tracking-[-0.04em] text-[#111826]">
+                    Список мастеров
+                  </h2>
+                  <p className="mt-1 text-[14px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    Выберите мастера для назначения
+                  </p>
+                </div>
+                <ul className="max-h-[420px] space-y-2 overflow-y-auto p-2">
+                  {switchMasterOptions.map((masterName) => (
+                    <li key={masterName}>
+                      <button
+                        type="button"
+                        onClick={() => setSwitchMasterSelection(masterName)}
+                        className={`flex min-h-[56px] w-full cursor-pointer items-center rounded-[10px] px-3 py-3 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                          switchMasterSelection === masterName
+                            ? "bg-[#EC1C24] text-white"
+                            : "bg-[#F3F3F5] text-[#111826] hover:bg-[#EBECF0]"
+                        }`}
+                      >
+                        <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-[#ECECEF]">
+                          <img
+                            src={masterPhotoByName[masterName] ?? "https://i.pravatar.cc/80"}
+                            alt={masterName}
+                            className="h-full w-full object-cover"
+                          />
+                        </span>
+                        <span className="ml-3">{masterName}</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <div className="flex items-center justify-between border-t border-[#EEEDF0] p-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSwitchMasterModalOpen(false);
+                      setSwitchMasterTargetId(null);
+                    }}
+                    className="h-11 rounded-[10px] bg-[#ECECEF] px-4 text-[15px] font-medium tracking-[-0.04em] text-black"
+                  >
+                    Отмена
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!switchMasterSelection}
+                    onClick={async () => {
+                      if (!switchMasterSelection || !switchMasterTargetId) return;
+                      const nextMaster = switchMasterSelection;
+                      const nextMasterPhoto = masterPhotoByName[nextMaster] ?? "https://i.pravatar.cc/80";
+                      try {
+                        if (isWorkOrdersRemoteEnabled()) {
+                          await updateWorkOrdersStorageRows([switchMasterTargetId], {
+                            master: nextMaster,
+                            master_photo: nextMasterPhoto,
+                          });
+                        }
+                        setRows((prev) =>
+                          prev.map((row) =>
+                            row.id === switchMasterTargetId
+                              ? { ...row, master: nextMaster, masterPhoto: nextMasterPhoto }
+                              : row,
+                          ),
+                        );
+                        setSwitchMasterModalOpen(false);
+                        setSwitchMasterTargetId(null);
+                      } catch (error) {
+                        console.warn("Failed to switch master from work-orders modal.", error);
+                        emitArchiveStyleToast({
+                          line1: "Не удалось сменить мастера",
+                          line2: "Проверьте подключение к базе и повторите",
+                        });
+                      }
+                    }}
+                    className="h-11 rounded-[10px] bg-[#EC1C24] px-5 text-[15px] font-medium tracking-[-0.04em] text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Назначить
+                  </button>
+                </div>
               </div>
             </div>,
             document.body,
@@ -1083,22 +2928,28 @@ export function WorkOrdersPage() {
           )
         : null}
       <style>{`
-        @keyframes workOrderHighlightBorder {
+        @keyframes workRowHighlightBorder {
           0% {
-            border-color: #EEEDF0;
             box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
           }
           20% {
-            border-color: #EC1C24;
             box-shadow: inset 0 0 0 3px #EC1C24;
           }
           70% {
-            border-color: #EC1C24;
             box-shadow: inset 0 0 0 3px #EC1C24;
           }
           100% {
-            border-color: #EEEDF0;
             box-shadow: inset 0 0 0 0 rgba(236, 28, 36, 0);
+          }
+        }
+        @keyframes archiveRowOut {
+          0% {
+            opacity: 1;
+            transform: scale(1);
+          }
+          100% {
+            opacity: 0;
+            transform: scale(0.985);
           }
         }
       `}</style>
