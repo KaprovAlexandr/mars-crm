@@ -27,6 +27,22 @@ type WorkOrderRow = {
   dueDate: string;
 };
 
+function matchesWorkOrderQuickFilter(
+  row: WorkOrderRow,
+  filter: "awaitingPayment" | "archive",
+  activeStatusFilter: Set<WorkOrderRow["status"]>,
+  activeMasterFilter: Set<string>,
+): boolean {
+  if (!activeMasterFilter.has(row.master)) return false;
+  if (filter === "archive") {
+    if (!row.archived) return false;
+    return activeStatusFilter.has(row.status);
+  }
+  if (row.archived) return false;
+  if (!activeStatusFilter.has(row.status)) return false;
+  return row.status === "Готово";
+}
+
 type DateAcceptancePreset = "today" | "yesterday" | "last7" | "last30" | "custom";
 type WorkOrderActionId = "open" | "status" | "urgent" | "edit" | "archive" | "callClient" | "switchMaster";
 type WorkOrderActionEntry = { id: WorkOrderActionId; label: string; danger?: boolean };
@@ -1142,7 +1158,7 @@ export function WorkOrdersPage() {
       } else if (row.archived) {
         return false;
       }
-      if (awaitingPaymentOnly && row.status !== "Готово") return false;
+      if (awaitingPaymentOnly && !matchesWorkOrderQuickFilter(row, "awaitingPayment", statusFilter, masterFilter)) return false;
       if (!statusFilter.has(row.status)) return false;
       if (!masterFilter.has(row.master)) return false;
       const rowDate = parseRuDate(row.dueDate);
@@ -1191,8 +1207,14 @@ export function WorkOrdersPage() {
     paginationItems.findIndex((item) => item === currentPageSafe),
   );
   const allPageRowsSelected = pagedRows.length > 0 && pagedRows.every((r) => selectedRowIds.has(r.id));
-  const awaitingPaymentCount = rows.filter((r) => r.status === "Готово" && (archiveOnly ? Boolean(r.archived) : !Boolean(r.archived))).length;
-  const archiveCount = rows.filter((r) => Boolean(r.archived)).length;
+  const awaitingPaymentCount = useMemo(
+    () => rows.filter((row) => matchesWorkOrderQuickFilter(row, "awaitingPayment", statusFilter, masterFilter)).length,
+    [rows, statusFilter, masterFilter],
+  );
+  const archiveCount = useMemo(
+    () => rows.filter((row) => matchesWorkOrderQuickFilter(row, "archive", statusFilter, masterFilter)).length,
+    [rows, statusFilter, masterFilter],
+  );
 
   const currentPageRef = useRef(currentPage);
   currentPageRef.current = currentPage;
