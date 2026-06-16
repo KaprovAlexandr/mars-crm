@@ -73,12 +73,12 @@ export function resolveEmployeeEmailByFullName(fullName: string): string | null 
 
 /**
  * Роль по e-mail из Firebase.
- * Нет e-mail (не вошли) — `manager`, чтобы демо без аккаунта не ломалось.
+ * Нет e-mail (не вошли) — `pending`; CRM-маршруты закрыты layout-ом.
  * E-mail не в списке выданных ролей — `pending` (ожидание прав администратором).
  */
 export function resolveEmployeeRoleFromEmail(email: string | null | undefined): EmployeeRole {
   const key = normalizeAuthEmail(email);
-  if (!key) return "manager";
+  if (!key) return "pending";
   const override = getEmployeeRoleOverride(key);
   if (override) return override;
   return ROLE_BY_EMAIL[key] ?? "pending";
@@ -190,14 +190,14 @@ export function getNavAccess(role: EmployeeRole, email?: string | null): NavAcce
   }
 }
 
-export type AppLandingPath = "/" | "/journal" | "/awaiting-access" | "/blocked-access";
+export type AppLandingPath = "/requests" | "/journal" | "/awaiting-access" | "/blocked-access";
 
 /** Стартовый маршрут после входа и при отказе в доступе к текущему URL. */
 export function resolveDefaultHomePath(role: EmployeeRole, blocked = false): AppLandingPath {
   if (blocked) return "/blocked-access";
   if (role === "pending") return "/awaiting-access";
   if (role === "master") return "/journal";
-  return "/";
+  return "/requests";
 }
 
 /** Куда перейти после успешного входа / регистрации. */
@@ -233,7 +233,6 @@ export function primaryDashboardPath(
 
 export function canAccessRoute(pathname: string, access: NavAccess): boolean {
   const p = pathname;
-  if (p.startsWith("/promo")) return true;
   if (p.startsWith("/auth") || p.startsWith("/register")) return true;
   if (p.startsWith("/test-request-form")) return true;
 
@@ -248,7 +247,7 @@ export function canAccessRoute(pathname: string, access: NavAccess): boolean {
   if (p.startsWith("/clients")) return access.clients;
   if (p.startsWith("/work-orders")) return access.workOrders;
   if (p.startsWith("/journal")) return access.journal;
-  if (p === "/" || p.startsWith("/requests")) return access.requests;
+  if (p === "/requests" || p.startsWith("/requests/")) return access.requests;
   if (p.startsWith("/profile")) return access.profile;
   return false;
 }

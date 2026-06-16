@@ -99,7 +99,7 @@ export function ProfilePage() {
   const [exitOverlay, setExitOverlay] = useState(false);
 
   const finishExitToPromo = useCallback(async () => {
-    navigate("/promo", { replace: true });
+    navigate("/", { replace: true });
     try {
       await logoutCurrentUser();
     } catch {

@@ -952,7 +952,7 @@ export function ClientDetailsPage2() {
     }
     if (item.targetKind === "request") {
       window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, item.targetId);
-      navigate(`/?request=${encodeURIComponent(item.targetId)}`);
+      navigate(`/requests?request=${encodeURIComponent(item.targetId)}`);
       return;
     }
     window.sessionStorage.setItem(BOOKING_LIST_FLASH_ARMED_KEY, item.targetId);

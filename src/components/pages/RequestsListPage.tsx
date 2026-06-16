@@ -415,7 +415,7 @@ export function RequestsListPage() {
 
   useEffect(() => {
     if (!isRequestsRemoteEnabled()) return;
-    const onRequestsPage = location.pathname === "/" || location.pathname.startsWith("/requests");
+    const onRequestsPage = location.pathname === "/requests" || location.pathname.startsWith("/requests/");
     if (!onRequestsPage) return;
     let cancelled = false;
     async function loadRequestsFromSupabase() {
@@ -491,7 +491,7 @@ export function RequestsListPage() {
             emitArchiveStyleToast({
               line1: `Создана заявка № ${r.id}`,
               line2: `${r.client} · ${r.phone}`,
-              navigateTo: `/?request=${encodeURIComponent(r.id)}`,
+              navigateTo: `/requests?request=${encodeURIComponent(r.id)}`,
             });
             appendUserActionLog({
               title: "Создать заявку",
@@ -507,7 +507,7 @@ export function RequestsListPage() {
             emitArchiveStyleToast({
               line1: `Новая заявка с сайта № ${r.id} (${r.client})`,
               line2: `${r.phone} · поступила с сайта`,
-              navigateTo: `/?request=${encodeURIComponent(r.id)}`,
+              navigateTo: `/requests?request=${encodeURIComponent(r.id)}`,
             });
           }
           continue;
@@ -820,7 +820,7 @@ export function RequestsListPage() {
             emitArchiveStyleToast({
               line1: `Заявка № ${restoredRowId} (${restoredClient})`,
               line2: "возвращена в таблицу",
-              navigateTo: `/?request=${encodeURIComponent(restoredRowId)}`,
+              navigateTo: `/requests?request=${encodeURIComponent(restoredRowId)}`,
             });
           }, 260);
         }
@@ -857,7 +857,7 @@ export function RequestsListPage() {
           emitArchiveStyleToast({
             line1: `Заявка № ${archivedRowId} (${archivedClient})`,
             line2: "перемещена в архив",
-            navigateTo: `/?request=${encodeURIComponent(archivedRowId)}&archive=1`,
+            navigateTo: `/requests?request=${encodeURIComponent(archivedRowId)}&archive=1`,
           });
         }, 260);
       }

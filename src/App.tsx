@@ -38,17 +38,8 @@ function AppProtectedLayout() {
     );
   }
 
-  /**
-   * После выхода из аккаунта e-mail пустой и роль считается как «manager», у которого нет
-   * `awaitingApprovalPage`. Тогда `canAccessRoute` отклоняет `/awaiting-access` и ведёт на `/`
-   * (Заявки) вместо промо. Явно отправляем незалогиненных с экрана ожидания на промо.
-   */
-  if (!firebaseUser && pathname.startsWith("/awaiting-access")) {
-    return <Navigate to="/promo" replace />;
-  }
-
-  if (!firebaseUser && pathname.startsWith("/blocked-access")) {
-    return <Navigate to="/promo" replace />;
+  if (!firebaseUser) {
+    return <Navigate to="/" replace />;
   }
 
   if (!canAccessRoute(pathname, access)) {
@@ -65,13 +56,14 @@ export default function App() {
         <Route path="/auth" element={<AuthLandingPage />} />
         <Route path="/register" element={<AuthLandingPage />} />
         <Route path="/privacy" element={<PrivacyPolicyPage />} />
-        <Route path="/promo" element={<PromoLandingPage />} />
+        <Route path="/" element={<PromoLandingPage />} />
+        <Route path="/promo" element={<Navigate to="/" replace />} />
         <Route path="/test-request-form" element={<TestRequestFormPage />} />
 
-        <Route path="/" element={<AppProtectedLayout />}>
+        <Route element={<AppProtectedLayout />}>
           <Route path="awaiting-access" element={<AwaitingAccessPage />} />
           <Route path="blocked-access" element={<BlockedAccessPage />} />
-          <Route index element={<RequestsListPage />} />
+          <Route path="requests" element={<RequestsListPage />} />
           <Route path="dashboard" element={<DashboardPage />} />
           <Route path="dashboard-owner" element={<DashboardOwnerPage />} />
           <Route path="documents" element={<DocumentsPage />} />

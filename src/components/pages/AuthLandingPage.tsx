@@ -109,7 +109,7 @@ export function AuthLandingPage() {
   const [googleLinkSending, setGoogleLinkSending] = useState(false);
   const [loaderShowMarsCube, setLoaderShowMarsCube] = useState(false);
   const loaderRafRef = useRef<number | null>(null);
-  const postAuthTargetRef = useRef("/");
+  const postAuthTargetRef = useRef("/requests");
 
   const fieldClass =
     "h-11 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[16px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] sm:h-12 sm:text-[18px]";

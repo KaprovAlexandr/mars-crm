@@ -4,7 +4,7 @@ import type { NotificationDeepLink, NotificationItem } from "@/lib/notifications
 export const DOCUMENT_LIST_FLASH_ARMED_KEY = "documentListFlashArmed";
 /** Выставляется перед navigate на /work-orders?workOrder=…; список подсвечивает строку только если armed совпал (не при возврате по истории). */
 export const WORK_ORDER_LIST_FLASH_ARMED_KEY = "workOrderListFlashArmed";
-/** Выставляется перед navigate на /?request=…; список заявок подсвечивает строку только если armed совпал. */
+/** Выставляется перед navigate на /requests?request=…; список заявок подсвечивает строку только если armed совпал. */
 export const REQUEST_LIST_FLASH_ARMED_KEY = "requestListFlashArmed";
 /** Выставляется перед navigate на /journal?booking=…; журнал подсвечивает запись только если armed совпал. */
 export const BOOKING_LIST_FLASH_ARMED_KEY = "bookingListFlashArmed";
@@ -44,7 +44,7 @@ export function inferNotificationDeepLink(n: Pick<NotificationItem, "title" | "d
 export function buildNotificationNavigatePath(link: NotificationDeepLink): string {
   switch (link.kind) {
     case "request":
-      return `/?request=${encodeURIComponent(link.requestId)}`;
+      return `/requests?request=${encodeURIComponent(link.requestId)}`;
     case "booking":
       return `/journal?booking=${encodeURIComponent(link.bookingId)}`;
     case "workOrder":

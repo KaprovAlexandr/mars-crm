@@ -88,13 +88,13 @@ export function TestRequestFormPage() {
       emitArchiveStyleToast({
         line1: `Новая заявка с сайта № ${requestId} (${created.client ?? normalizedClient})`,
         line2: `${created.phone ?? normalizedPhone} · поступила с сайта`,
-        navigateTo: `/?request=${encodeURIComponent(requestId)}`,
+        navigateTo: `/requests?request=${encodeURIComponent(requestId)}`,
       });
 
       setFullName("");
       setPhone("");
       setComment("");
-      navigate(`/?request=${encodeURIComponent(requestId)}`);
+      navigate(`/requests?request=${encodeURIComponent(requestId)}`);
     } catch (error) {
       console.warn("Failed to create site request from test page.", error);
       emitArchiveStyleToast({

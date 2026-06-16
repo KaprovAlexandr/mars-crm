@@ -14,7 +14,7 @@ export function Sidebar({ items }: SidebarProps) {
 
   const iconRouteMap: Partial<Record<SidebarItem["icon"], string>> = {
     home: "/dashboard",
-    requests: "/",
+    requests: "/requests",
     settings: "/settings",
   };
 

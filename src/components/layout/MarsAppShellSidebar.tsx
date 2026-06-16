@@ -60,7 +60,7 @@ export type MarsAppShellSidebarProps = {
 type NavKey = "requests" | "journal" | "workOrders" | "clients" | "dashboard" | "documents" | "settings" | "profile";
 
 function activeNavKey(pathname: string): NavKey | null {
-  if (pathname === "/" || pathname.startsWith("/requests")) return "requests";
+  if (pathname === "/requests" || pathname.startsWith("/requests/")) return "requests";
   if (pathname.startsWith("/journal")) return "journal";
   if (pathname.startsWith("/work-orders")) return "workOrders";
   if (pathname.startsWith("/clients")) return "clients";
@@ -202,7 +202,7 @@ export function MarsAppShellSidebar({ mobileLayout = "default" }: MarsAppShellSi
                       <li>
                         <button
                           type="button"
-                          onClick={() => go("/")}
+                          onClick={() => go("/requests")}
                           className={`group flex w-full items-center gap-3 rounded-[12px] px-3 py-3 text-left text-[15px] font-medium tracking-[-0.04em] text-white hover:bg-white/10 ${
                             active === "requests" ? "bg-white/15" : ""
                           }`}
@@ -323,7 +323,7 @@ export function MarsAppShellSidebar({ mobileLayout = "default" }: MarsAppShellSi
                       <li>
                         <button
                           type="button"
-                          onClick={() => go("/")}
+                          onClick={() => go("/requests")}
                           className={`group flex w-full items-center gap-3 rounded-[12px] px-3 py-3 text-left text-[15px] font-medium tracking-[-0.04em] text-white hover:bg-white/10 ${
                             active === "requests" ? "bg-white/15" : ""
                           }`}
@@ -542,7 +542,7 @@ export function MarsAppShellSidebar({ mobileLayout = "default" }: MarsAppShellSi
                 ) : null}
                 <button
                   type="button"
-                  onClick={() => navigate("/")}
+                  onClick={() => navigate("/requests")}
                   className={`grid h-12 w-12 shrink-0 place-items-center rounded-[10px] ${iconTileClass(active === "requests")}`}
                   title="Заявки"
                   aria-label="Заявки"
@@ -604,7 +604,7 @@ export function MarsAppShellSidebar({ mobileLayout = "default" }: MarsAppShellSi
                 {showRequestsNav ? (
                 <button
                   type="button"
-                  onClick={() => navigate("/")}
+                  onClick={() => navigate("/requests")}
                   className={`grid h-12 w-12 shrink-0 place-items-center rounded-[10px] ${iconTileClass(active === "requests")}`}
                   title="Заявки"
                   aria-label="Заявки"
@@ -715,7 +715,7 @@ export function MarsAppShellSidebar({ mobileLayout = "default" }: MarsAppShellSi
                 <MarsShellSidebarIcon type="grid" />
               </button>
             ) : null}
-            <button type="button" onClick={() => navigate("/")} className={`mb-2 grid h-12 w-12 place-items-center rounded-[10px] ${iconTileClass(active === "requests")}`}>
+            <button type="button" onClick={() => navigate("/requests")} className={`mb-2 grid h-12 w-12 place-items-center rounded-[10px] ${iconTileClass(active === "requests")}`}>
               <MarsShellSidebarIcon type="cube" />
             </button>
             <button type="button" onClick={() => navigate("/journal")} className={`mb-2 grid h-12 w-12 place-items-center rounded-[10px] ${iconTileClass(active === "journal")}`}>
@@ -759,7 +759,7 @@ export function MarsAppShellSidebar({ mobileLayout = "default" }: MarsAppShellSi
         ) : (
           <>
             {showRequestsNav ? (
-            <button type="button" onClick={() => navigate("/")} className={`mb-2 grid h-12 w-12 place-items-center rounded-[10px] ${iconTileClass(active === "requests")}`}>
+            <button type="button" onClick={() => navigate("/requests")} className={`mb-2 grid h-12 w-12 place-items-center rounded-[10px] ${iconTileClass(active === "requests")}`}>
               <MarsShellSidebarIcon type="cube" />
             </button>
             ) : null}

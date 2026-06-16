@@ -13,7 +13,7 @@ export function AccessRestrictedPage({ titleLines, description }: AccessRestrict
   const [exitActive, setExitActive] = useState(false);
 
   const finishExitToPromo = useCallback(async () => {
-    navigate("/promo", { replace: true });
+    navigate("/", { replace: true });
     try {
       await logoutCurrentUser();
     } catch {
