@@ -1,4 +1,4 @@
-import { normalizeAuthEmail } from "@/lib/auth/employeeRole";
+import { getEmployeeFullName, normalizeAuthEmail } from "@/lib/auth/employeeRole";
 
 function emailLocalPart(email: string): string {
   return normalizeAuthEmail(email).split("@")[0] ?? "";
@@ -35,6 +35,9 @@ export function pickBetterEmployeeFullName(
   ...candidates: Array<string | null | undefined>
 ): string {
   const key = normalizeAuthEmail(email);
+  const mapped = getEmployeeFullName(key);
+  if (mapped) return mapped;
+
   const ranked = candidates
     .map((value) => (typeof value === "string" ? value.trim() : ""))
     .filter(Boolean)

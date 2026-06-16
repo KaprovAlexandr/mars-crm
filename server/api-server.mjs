@@ -9,6 +9,8 @@ import {
   normalizeAuthEmail,
   pickBetterEmployeeFullName,
   resolveEmployeeRoleFromEmail,
+  getEmployeeFullName,
+  EMPLOYEE_FULL_NAME_BY_EMAIL,
 } from "./employee-roles.mjs";
 import { verifyFirebaseIdToken } from "./firebase-id-token.mjs";
 import {
@@ -255,7 +257,7 @@ async function listPendingEmployeesFromDatabase(overrides) {
     pending.push({
       id: `pending-${email.replace(/[^a-z0-9]+/gi, "-")}`,
       email,
-      fullName,
+      fullName: getEmployeeFullName(email) || fullName,
       registeredAt: formatRuDateTimeFromDate(row.registered_at ?? new Date()),
     });
   }
@@ -321,7 +323,7 @@ async function listPendingEmployeesFromFirebase(overrides) {
       pending.push({
         id: `pending-${email.replace(/[^a-z0-9]+/gi, "-")}`,
         email,
-        fullName,
+        fullName: getEmployeeFullName(email) || fullName,
         registeredAt,
       });
     }
@@ -1199,6 +1201,13 @@ app.post("/api/auth/ensure-password", async (req, res) => {
   }
 });
 
+async function syncCanonicalEmployeeProfileNames() {
+  for (const [email, fullName] of Object.entries(EMPLOYEE_FULL_NAME_BY_EMAIL)) {
+    await pool.query(`update user_profiles set full_name = $1 where email = $2`, [fullName, email]);
+    await pool.query(`update pending_access_requests set full_name = $1 where email = $2`, [fullName, email]);
+  }
+}
+
 async function main() {
   try {
     await ensureClientsExtraColumns();
@@ -1229,6 +1238,11 @@ async function main() {
   } catch (error) {
     console.error("Failed to ensure pending_access_requests schema:", error?.message ?? error);
     process.exit(1);
+  }
+  try {
+    await syncCanonicalEmployeeProfileNames();
+  } catch (error) {
+    console.error("Failed to sync canonical employee profile names:", error?.message ?? error);
   }
   app.listen(API_PORT, () => {
     console.log(`API server listening on http://localhost:${API_PORT}`);

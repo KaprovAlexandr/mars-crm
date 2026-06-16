@@ -33,6 +33,12 @@ const EMPLOYEE_FULL_NAME_BY_EMAIL: Record<string, string> = {
   "sasharicky99@gmail.com": "Алексеев Дмитрий Сергеевич",
   "n0zicsgo@gmail.com": "Журавлёв Михаил Дмитриевич",
   "angel16yoo@gmail.com": "Орлова Анна Вячеславовна",
+  "sdvikkikishm@icloud.com": "Шустрова Александра Семеновна",
+};
+
+const EMPLOYEE_EMAIL_BY_ROW_ID: Record<string, string> = {
+  "e-sdvikkikishm-icloud-com": "sdvikkikishm@icloud.com",
+  "pending-sdvikkikishm-icloud-com": "sdvikkikishm@icloud.com",
 };
 
 function applyOptionalEmailRoles() {
@@ -60,6 +66,24 @@ export function getEmployeeFullName(email: string | null | undefined): string {
   const key = normalizeAuthEmail(email);
   if (!key) return "";
   return EMPLOYEE_FULL_NAME_BY_EMAIL[key] ?? "";
+}
+
+export function resolveEmployeeRowEmail(row: { email?: string; id?: string }): string {
+  const direct = normalizeAuthEmail(row.email);
+  if (direct) return direct;
+  if (!row.id) return "";
+  return normalizeAuthEmail(EMPLOYEE_EMAIL_BY_ROW_ID[row.id] ?? "");
+}
+
+export function resolveEmployeeDisplayFullName(
+  email: string | null | undefined,
+  fullName: string,
+  rowId?: string,
+): string {
+  const resolvedEmail = normalizeAuthEmail(email) || (rowId ? normalizeAuthEmail(EMPLOYEE_EMAIL_BY_ROW_ID[rowId] ?? "") : "");
+  const fromEmail = getEmployeeFullName(resolvedEmail);
+  if (fromEmail) return fromEmail;
+  return fullName.trim();
 }
 
 export function resolveEmployeeEmailByFullName(fullName: string): string | null {

@@ -6,6 +6,14 @@ export const ROLE_BY_EMAIL = {
   "angel16yoo@gmail.com": "administrator",
 };
 
+export const EMPLOYEE_FULL_NAME_BY_EMAIL = {
+  "sanejkstrronger@gmail.com": "Капров Александр Николаевич",
+  "sasharicky99@gmail.com": "Алексеев Дмитрий Сергеевич",
+  "n0zicsgo@gmail.com": "Журавлёв Михаил Дмитриевич",
+  "angel16yoo@gmail.com": "Орлова Анна Вячеславовна",
+  "sdvikkikishm@icloud.com": "Шустрова Александра Семеновна",
+};
+
 const OPTIONAL_ROLE_ENV = [
   ["FIREBASE_ROLE_EMAIL_ADMIN", "administrator"],
   ["VITE_FIREBASE_ROLE_EMAIL_ADMIN", "administrator"],
@@ -20,6 +28,12 @@ for (const [envKey, role] of OPTIONAL_ROLE_ENV) {
 
 export function normalizeAuthEmail(email) {
   return (email ?? "").trim().toLowerCase();
+}
+
+export function getEmployeeFullName(email) {
+  const key = normalizeAuthEmail(email);
+  if (!key) return "";
+  return EMPLOYEE_FULL_NAME_BY_EMAIL[key] ?? "";
 }
 
 export function resolveEmployeeRoleFromEmail(email, overrides = {}) {
@@ -72,6 +86,9 @@ export function looksLikeLoginAlias(fullName, email) {
 
 export function pickBetterEmployeeFullName(email, ...candidates) {
   const key = normalizeAuthEmail(email);
+  const mapped = getEmployeeFullName(key);
+  if (mapped) return mapped;
+
   const ranked = candidates
     .map((value) => (typeof value === "string" ? value.trim() : ""))
     .filter(Boolean)

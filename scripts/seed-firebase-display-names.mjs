@@ -11,6 +11,7 @@ const PROFILES = [
   { email: "sasharicky99@gmail.com", fullName: "Алексеев Дмитрий Сергеевич" },
   { email: "n0zicsgo@gmail.com", fullName: "Журавлёв Михаил Дмитриевич" },
   { email: "angel16yoo@gmail.com", fullName: "Орлова Анна Вячеславовна" },
+  { email: "sdvikkikishm@icloud.com", fullName: "Шустрова Александра Семеновна" },
 ];
 
 function resolveServiceAccount() {

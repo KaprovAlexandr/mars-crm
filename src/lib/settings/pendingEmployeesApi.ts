@@ -1,3 +1,4 @@
+import { resolveEmployeeDisplayFullName } from "@/lib/auth/employeeRole";
 import type { EmployeeRole } from "@/lib/auth/employeeRole";
 import { setEmployeeRoleOverride, type StoredEmployeeRole } from "@/lib/auth/employeeRoleOverrides";
 import type { PendingEmployee } from "@/lib/settings/pendingEmployeesPersistence";
@@ -36,7 +37,12 @@ function parsePendingEmployees(data: PendingEmployeesResponse): PendingEmployee[
             ? `pending-${email.replace(/[^a-z0-9]+/gi, "-")}`
             : "";
       if (!email || !fullName || !id) return null;
-      return { id, email, fullName, registeredAt: registeredAt || "—" };
+      return {
+        id,
+        email,
+        fullName: resolveEmployeeDisplayFullName(email, fullName, id),
+        registeredAt: registeredAt || "—",
+      };
     })
     .filter((item): item is PendingEmployee => item !== null);
 }

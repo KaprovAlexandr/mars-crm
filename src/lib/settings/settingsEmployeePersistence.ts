@@ -1,3 +1,5 @@
+import { resolveEmployeeDisplayFullName } from "@/lib/auth/employeeRole";
+
 type PersistedEmployeeRow = {
   id: string;
   fullName: string;
@@ -9,6 +11,13 @@ type PersistedEmployeeRow = {
 };
 
 const SETTINGS_EMPLOYEE_ROWS_KEY = "settingsEmployeeRowsV1";
+
+function normalizeEmployeeRow<T extends PersistedEmployeeRow>(row: T): T {
+  return {
+    ...row,
+    fullName: resolveEmployeeDisplayFullName(row.email, row.fullName, row.id),
+  };
+}
 
 function canUseLocalStorage(): boolean {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -31,23 +40,25 @@ function isEmployeeRowArray(value: unknown): value is PersistedEmployeeRow[] {
 }
 
 export function loadSettingsEmployeeRows<T extends PersistedEmployeeRow>(defaults: T[]): T[] {
-  if (!canUseLocalStorage()) return defaults;
+  if (!canUseLocalStorage()) return defaults.map((row) => normalizeEmployeeRow(row));
   try {
     const raw = window.localStorage.getItem(SETTINGS_EMPLOYEE_ROWS_KEY);
-    if (!raw) return defaults;
+    if (!raw) return defaults.map((row) => normalizeEmployeeRow(row));
     const parsed = JSON.parse(raw) as unknown;
-    if (!isEmployeeRowArray(parsed)) return defaults;
+    if (!isEmployeeRowArray(parsed)) return defaults.map((row) => normalizeEmployeeRow(row));
     const byId = new Map(parsed.map((row) => [row.id, row]));
     const defaultIds = new Set(defaults.map((row) => row.id));
     const mergedDefaults = defaults.map((row) => {
       const stored = byId.get(row.id);
-      if (!stored) return row;
-      return { ...row, ...stored };
+      if (!stored) return normalizeEmployeeRow(row);
+      return normalizeEmployeeRow({ ...row, ...stored });
     });
-    const extras = parsed.filter((row) => !defaultIds.has(row.id)).map((row) => row as T);
+    const extras = parsed
+      .filter((row) => !defaultIds.has(row.id))
+      .map((row) => normalizeEmployeeRow(row as T));
     return [...extras, ...mergedDefaults];
   } catch {
-    return defaults;
+    return defaults.map((row) => normalizeEmployeeRow(row));
   }
 }
 
@@ -65,7 +76,7 @@ export function buildEmployeeRowFromPending(
   role: string,
 ): PersistedEmployeeRow & { email: string } {
   const emailSlug = pending.email.replace(/[^a-z0-9]+/gi, "-");
-  return {
+  return normalizeEmployeeRow({
     id: pending.id.startsWith("pending-") ? `e-${emailSlug}` : pending.id,
     fullName: pending.fullName,
     photo: "",
@@ -73,7 +84,7 @@ export function buildEmployeeRowFromPending(
     status: "Активен",
     lastActivity: pending.registeredAt || "—",
     email: pending.email,
-  };
+  });
 }
 
 export function upsertEmployeeRow<T extends PersistedEmployeeRow>(rows: T[], nextRow: T): T[] {
@@ -82,7 +93,7 @@ export function upsertEmployeeRow<T extends PersistedEmployeeRow>(rows: T[], nex
     (row) => row.id === nextRow.id || (emailKey && row.email?.trim().toLowerCase() === emailKey),
   );
   if (index >= 0) {
-    return rows.map((row, i) => (i === index ? { ...row, ...nextRow, id: row.id } : row));
+    return rows.map((row, i) => (i === index ? normalizeEmployeeRow({ ...row, ...nextRow, id: row.id }) : row));
   }
-  return [nextRow, ...rows];
+  return [normalizeEmployeeRow(nextRow), ...rows];
 }

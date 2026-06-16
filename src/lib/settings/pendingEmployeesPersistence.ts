@@ -1,6 +1,11 @@
 import { isEmployeeBlocked } from "@/lib/auth/employeeBlockPersistence";
 import { pickBetterEmployeeFullName } from "@/lib/auth/employeeFullName";
-import { normalizeAuthEmail, resolveEmployeeRoleFromEmail, ROLE_LABELS } from "@/lib/auth/employeeRole";
+import {
+  normalizeAuthEmail,
+  resolveEmployeeDisplayFullName,
+  resolveEmployeeRoleFromEmail,
+  ROLE_LABELS,
+} from "@/lib/auth/employeeRole";
 import { readStoredUserFullName } from "@/lib/auth/userFullName";
 
 export type PendingEmployee = {
@@ -37,6 +42,13 @@ function notifyPendingEmployeesUpdated(): void {
   window.dispatchEvent(new Event(PENDING_EMPLOYEES_UPDATED_EVENT));
 }
 
+function normalizePendingEmployee(row: PendingEmployee): PendingEmployee {
+  return {
+    ...row,
+    fullName: resolveEmployeeDisplayFullName(row.email, row.fullName, row.id),
+  };
+}
+
 function readPendingEmployees(): PendingEmployee[] {
   if (!canUseLocalStorage()) return [];
   try {
@@ -44,15 +56,17 @@ function readPendingEmployees(): PendingEmployee[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is PendingEmployee =>
-        Boolean(item) &&
-        typeof item === "object" &&
-        typeof (item as PendingEmployee).id === "string" &&
-        typeof (item as PendingEmployee).email === "string" &&
-        typeof (item as PendingEmployee).fullName === "string" &&
-        typeof (item as PendingEmployee).registeredAt === "string",
-    );
+    return parsed
+      .filter(
+        (item): item is PendingEmployee =>
+          Boolean(item) &&
+          typeof item === "object" &&
+          typeof (item as PendingEmployee).id === "string" &&
+          typeof (item as PendingEmployee).email === "string" &&
+          typeof (item as PendingEmployee).fullName === "string" &&
+          typeof (item as PendingEmployee).registeredAt === "string",
+      )
+      .map((row) => normalizePendingEmployee(row));
   } catch {
     return [];
   }
@@ -61,7 +75,7 @@ function readPendingEmployees(): PendingEmployee[] {
 function writePendingEmployees(rows: PendingEmployee[]): void {
   if (!canUseLocalStorage()) return;
   try {
-    window.localStorage.setItem(PENDING_EMPLOYEES_KEY, JSON.stringify(rows));
+    window.localStorage.setItem(PENDING_EMPLOYEES_KEY, JSON.stringify(rows.map((row) => normalizePendingEmployee(row))));
     notifyPendingEmployeesUpdated();
   } catch {
     // ignore quota errors
@@ -78,14 +92,15 @@ export function replacePendingEmployees(rows: PendingEmployee[]): void {
 }
 
 export function pendingEmployeeToTableRow(pending: PendingEmployee): PendingEmployeeTableRow {
+  const normalized = normalizePendingEmployee(pending);
   return {
-    id: pending.id,
-    fullName: pending.fullName,
+    id: normalized.id,
+    fullName: normalized.fullName,
     photo: "",
     role: ROLE_LABELS.pending,
     status: "Ожидание доступа",
-    lastActivity: pending.registeredAt,
-    email: pending.email,
+    lastActivity: normalized.registeredAt,
+    email: normalized.email,
     pendingAccess: true,
   };
 }
@@ -100,11 +115,11 @@ export function registerPendingEmployee(input: { email: string; fullName: string
   if (existing) {
     const next = rows.map((row) =>
       normalizeAuthEmail(row.email) === email
-        ? {
+        ? normalizePendingEmployee({
             ...row,
             fullName: pickBetterEmployeeFullName(email, fullName, row.fullName, readStoredUserFullName(email)),
             registeredAt: row.registeredAt || input.registeredAt || formatRuDateTimeNow(),
-          }
+          })
         : row,
     );
     writePendingEmployees(next);
@@ -112,12 +127,12 @@ export function registerPendingEmployee(input: { email: string; fullName: string
   }
 
   writePendingEmployees([
-    {
+    normalizePendingEmployee({
       id: `pending-${email.replace(/[^a-z0-9]+/gi, "-")}`,
       email,
       fullName,
       registeredAt: input.registeredAt ?? formatRuDateTimeNow(),
-    },
+    }),
     ...rows,
   ]);
 }

@@ -3,7 +3,7 @@ import { clampCommentTooltipPos, previewComment } from "@/lib/ui/commentPreview"
 import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 import { ProfilePhotoFace } from "@/components/ui/ProfilePhotoFace";
 import { blockEmployeeEmail, isEmployeeBlocked } from "@/lib/auth/employeeBlockPersistence";
-import { resolveEmployeeEmailByFullName } from "@/lib/auth/employeeRole";
+import { resolveEmployeeDisplayFullName, resolveEmployeeEmailByFullName } from "@/lib/auth/employeeRole";
 import { useEmployeeRole } from "@/lib/auth/AuthRoleContext";
 import { mapEmployeeRoleLabelToRole, setEmployeeRoleOverride } from "@/lib/auth/employeeRoleOverrides";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
@@ -1602,7 +1602,30 @@ export function SettingsPage() {
     [pendingEmployees],
   );
   const awaitingResponseCount = pendingEmployeeRows.length;
-  const employeesTableRows = awaitingResponseOnly ? pendingEmployeeRows : employeeRows;
+  const employeesTableRows = useMemo(() => {
+    const rows = awaitingResponseOnly ? pendingEmployeeRows : employeeRows;
+    return rows.map((row) => ({
+      ...row,
+      fullName: resolveEmployeeDisplayFullName(row.email, row.fullName, row.id),
+    }));
+  }, [awaitingResponseOnly, pendingEmployeeRows, employeeRows]);
+
+  useEffect(() => {
+    setEmployeeRows((prev) => {
+      const next = prev.map((row) => ({
+        ...row,
+        fullName: resolveEmployeeDisplayFullName(row.email, row.fullName, row.id),
+      }));
+      return next.some((row, index) => row.fullName !== prev[index]?.fullName) ? next : prev;
+    });
+    setPendingEmployees((prev) => {
+      const next = prev.map((row) => ({
+        ...row,
+        fullName: resolveEmployeeDisplayFullName(row.email, row.fullName, row.id),
+      }));
+      return next.some((row, index) => row.fullName !== prev[index]?.fullName) ? next : prev;
+    });
+  }, []);
 
   useEffect(() => {
     const refreshPendingEmployees = () => setPendingEmployees(loadPendingEmployees());
