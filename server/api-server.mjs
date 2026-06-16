@@ -20,6 +20,11 @@ import {
   isFirebaseAdminReady,
 } from "./firebase-admin.mjs";
 import { sendClientRetentionSms } from "./sms.mjs";
+import {
+  formatJournalWallClockDateTime,
+  journalDateTimeSelectExpr,
+  journalDateTimeSqlValue,
+} from "./journal-date-time.mjs";
 
 dotenv.config();
 
@@ -376,6 +381,7 @@ const REQUEST_COLUMNS = [
   "archived",
   "comment",
 ];
+
 const JOURNAL_COLUMNS = [
   "id",
   "box_id",
@@ -389,6 +395,30 @@ const JOURNAL_COLUMNS = [
   "status",
   "status_actor",
 ];
+
+const JOURNAL_SELECT_COLUMNS = JOURNAL_COLUMNS.map((column) =>
+  column === "start_time" || column === "end_time" ? journalDateTimeSelectExpr(column) : column,
+);
+
+const JOURNAL_RETURN_COLUMNS = JOURNAL_COLUMNS.map((column) =>
+  column === "start_time" || column === "end_time" ? journalDateTimeSelectExpr(column) : column,
+);
+
+function journalInsertValueExpr(column, paramIndex) {
+  if (column === "start_time" || column === "end_time") {
+    return journalDateTimeSqlValue(paramIndex);
+  }
+  return `$${paramIndex}`;
+}
+
+function normalizeJournalRowDates(row) {
+  return {
+    ...row,
+    start_time: formatJournalWallClockDateTime(row.start_time),
+    end_time: formatJournalWallClockDateTime(row.end_time),
+  };
+}
+
 const WORK_ORDER_COLUMNS = [
   "id",
   "status",
@@ -415,26 +445,6 @@ const CLIENT_COLUMNS = [
   "car",
   "plate",
 ];
-
-function formatLocalDateTimeLikeUi(value) {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  const yyyy = parsed.getFullYear();
-  const mm = String(parsed.getMonth() + 1).padStart(2, "0");
-  const dd = String(parsed.getDate()).padStart(2, "0");
-  const hh = String(parsed.getHours()).padStart(2, "0");
-  const mi = String(parsed.getMinutes()).padStart(2, "0");
-  const ss = String(parsed.getSeconds()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
-}
-
-function normalizeJournalRowDates(row) {
-  return {
-    ...row,
-    start_time: formatLocalDateTimeLikeUi(row.start_time),
-    end_time: formatLocalDateTimeLikeUi(row.end_time),
-  };
-}
 
 app.get("/api/health", async (_req, res) => {
   try {
@@ -516,12 +526,12 @@ app.get("/api/journal-bookings", async (_req, res) => {
   try {
     const { rows } = await pool.query(
       `
-      select ${JOURNAL_COLUMNS.join(", ")}
+      select ${JOURNAL_SELECT_COLUMNS.join(", ")}
       from journal_bookings
       order by start_time asc, id asc
       `,
     );
-    res.json(rows);
+    res.json(rows.map(normalizeJournalRowDates));
   } catch (error) {
     res.status(500).json({ error: "Failed to load journal bookings.", details: String(error?.message ?? error) });
   }
@@ -534,12 +544,12 @@ app.post("/api/journal-bookings", async (req, res) => {
     const { rows } = await pool.query(
       `
       insert into journal_bookings (${JOURNAL_COLUMNS.join(", ")})
-      values (${JOURNAL_COLUMNS.map((_, idx) => `$${idx + 1}`).join(", ")})
-      returning ${JOURNAL_COLUMNS.join(", ")}
+      values (${JOURNAL_COLUMNS.map((column, idx) => journalInsertValueExpr(column, idx + 1)).join(", ")})
+      returning ${JOURNAL_RETURN_COLUMNS.join(", ")}
       `,
       values,
     );
-    res.status(201).json(rows[0]);
+    res.status(201).json(normalizeJournalRowDates(rows[0]));
   } catch (error) {
     res.status(500).json({ error: "Failed to create journal booking.", details: String(error?.message ?? error) });
   }

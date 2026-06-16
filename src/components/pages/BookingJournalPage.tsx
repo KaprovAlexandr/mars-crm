@@ -25,6 +25,7 @@ import { createPortal } from "react-dom";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { Booking, Service, Slot } from "../../lib/booking-journal/getAvailableSlots";
 import { getAvailableSlots, isSlotStillFree, slotKey } from "../../lib/booking-journal/getAvailableSlots";
+import { formatJournalWallClockDateTime } from "@/lib/booking-journal/journalDateTime";
 import type { Car, Client } from "../../lib/booking-journal/bookingClientsSearch";
 import { findClientsByNationalPhone, findClientsBySurname } from "../../lib/booking-journal/bookingClientsSearch";
 import { mergeApiClientsIntoJournalClients, mergeJournalClientLists } from "../../lib/booking-journal/journalClientsDirectory";
@@ -266,23 +267,12 @@ type JournalRow = Booking & {
   statusActor?: JournalStatusActor;
 };
 function mapStorageJournalRowToUi(row: JournalStorageRow): JournalRow {
-  const normalizeDateTime = (value: string): string => {
-    const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) return value;
-    const yyyy = parsed.getFullYear();
-    const mm = String(parsed.getMonth() + 1).padStart(2, "0");
-    const dd = String(parsed.getDate()).padStart(2, "0");
-    const hh = String(parsed.getHours()).padStart(2, "0");
-    const mi = String(parsed.getMinutes()).padStart(2, "0");
-    const ss = String(parsed.getSeconds()).padStart(2, "0");
-    return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
-  };
   return {
     id: row.id,
     boxId: row.box_id,
     masterId: row.master_id,
-    startTime: normalizeDateTime(row.start_time),
-    endTime: normalizeDateTime(row.end_time),
+    startTime: formatJournalWallClockDateTime(row.start_time),
+    endTime: formatJournalWallClockDateTime(row.end_time),
     clientTitle: row.client_title,
     clientPhone: row.client_phone ?? "",
     service: row.service,
