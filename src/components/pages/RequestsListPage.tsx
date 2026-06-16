@@ -5,7 +5,7 @@ import {
 import { appendUserActionLog } from "@/lib/notifications/actionActivityLog";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { REQUEST_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
-import { CURRENT_USER_DISPLAY_NAME as KAPROV } from "@/lib/session/currentUser";
+import { CURRENT_USER_DISPLAY_NAME as KAPROV, isCurrentUserManager } from "@/lib/session/currentUser";
 import { useEmployeeRole } from "@/lib/auth/AuthRoleContext";
 import { canAssignRequestLeadRole } from "@/lib/auth/employeeRole";
 import {
@@ -112,6 +112,31 @@ function formatRuToIsoDate(value: string): string {
   const d = parseRuDate(value);
   if (!d) return new Date().toISOString();
   return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0, 0).toISOString();
+}
+
+function isRequestOverdue(row: RequestTableRow, nowTs = Date.now()): boolean {
+  if (row.status === "Новая") {
+    const createdAtTs = parseRuDate(row.createdAt)?.getTime();
+    return row.manager === null && createdAtTs !== undefined && createdAtTs !== null && nowTs - createdAtTs > 24 * 60 * 60 * 1000;
+  }
+  if (row.status === "В обработке") {
+    const lastActivityTs = parseRuDate(row.lastActivityAt)?.getTime();
+    return row.manager !== null && lastActivityTs !== undefined && lastActivityTs !== null && nowTs - lastActivityTs > 24 * 60 * 60 * 1000;
+  }
+  return false;
+}
+
+function matchesQuickFilterRow(
+  row: RequestTableRow,
+  filter: "overdue" | "unassigned" | "mine" | "archive",
+  activeStatusFilter: Set<RequestStatusFilter>,
+): boolean {
+  if (filter === "archive") return Boolean(row.archived);
+  if (row.archived) return false;
+  if (!activeStatusFilter.has(row.status)) return false;
+  if (filter === "unassigned") return row.status === "Новая" && row.manager === null;
+  if (filter === "mine") return isCurrentUserManager(row.manager);
+  return isRequestOverdue(row);
 }
 
 function mapSupabaseRequestToUi(row: RequestsStorageRow): RequestTableRow {
@@ -394,24 +419,22 @@ export function RequestsListPage() {
   const selfTakeWorkRequestIdsRef = useRef(new Set<string>());
   const manuallyCreatedRequestIdsRef = useRef(new Set<string>());
 
-  const unassignedCount = useMemo(() => rows.filter((r) => r.status === "Новая" && r.manager === null).length, [rows]);
-  const mineCount = useMemo(() => rows.filter((r) => r.manager === KAPROV).length, [rows]);
-  const overdueCount = useMemo(
-    () =>
-      rows.filter((r) => {
-        if (r.status === "Новая") {
-          const createdAtTs = parseRuDate(r.createdAt)?.getTime();
-          return r.manager === null && createdAtTs !== undefined && createdAtTs !== null && Date.now() - createdAtTs > 24 * 60 * 60 * 1000;
-        }
-        if (r.status === "В обработке") {
-          const lastActivityTs = parseRuDate(r.lastActivityAt)?.getTime();
-          return r.manager !== null && lastActivityTs !== undefined && lastActivityTs !== null && Date.now() - lastActivityTs > 24 * 60 * 60 * 1000;
-        }
-        return false;
-      }).length,
-    [rows],
+  const unassignedCount = useMemo(
+    () => rows.filter((row) => matchesQuickFilterRow(row, "unassigned", statusFilter)).length,
+    [rows, statusFilter],
   );
-  const archiveCount = useMemo(() => rows.filter((r) => Boolean(r.archived)).length, [rows]);
+  const mineCount = useMemo(
+    () => rows.filter((row) => matchesQuickFilterRow(row, "mine", statusFilter)).length,
+    [rows, statusFilter],
+  );
+  const overdueCount = useMemo(
+    () => rows.filter((row) => matchesQuickFilterRow(row, "overdue", statusFilter)).length,
+    [rows, statusFilter],
+  );
+  const archiveCount = useMemo(
+    () => rows.filter((row) => matchesQuickFilterRow(row, "archive", statusFilter)).length,
+    [rows, statusFilter],
+  );
 
   useEffect(() => {
     if (!isRequestsRemoteEnabled()) return;
@@ -513,7 +536,7 @@ export function RequestsListPage() {
           continue;
         }
         const oldM = prevById.get(r.id);
-        if (oldM !== r.manager && r.manager === KAPROV) {
+        if (oldM !== r.manager && isCurrentUserManager(r.manager)) {
           if (selfTakeWorkRequestIdsRef.current.has(r.id)) {
             selfTakeWorkRequestIdsRef.current.delete(r.id);
             continue;
@@ -544,19 +567,8 @@ export function RequestsListPage() {
         if (!byClient && !byPhone) return false;
       }
       if (unassignedOnly && (row.status !== "Новая" || row.manager !== null)) return false;
-      if (mineOnly && row.manager !== KAPROV) return false;
-      if (overdueOnly) {
-        const nowTs = Date.now();
-        if (row.status === "Новая") {
-          const createdAtTs = parseRuDate(row.createdAt)?.getTime();
-          if (!(row.manager === null && createdAtTs !== undefined && createdAtTs !== null && nowTs - createdAtTs > 24 * 60 * 60 * 1000)) return false;
-        } else if (row.status === "В обработке") {
-          const lastActivityTs = parseRuDate(row.lastActivityAt)?.getTime();
-          if (!(row.manager !== null && lastActivityTs !== undefined && lastActivityTs !== null && nowTs - lastActivityTs > 24 * 60 * 60 * 1000)) return false;
-        } else {
-          return false;
-        }
-      }
+      if (mineOnly && !isCurrentUserManager(row.manager)) return false;
+      if (overdueOnly && !isRequestOverdue(row)) return false;
       if (archiveOnly) {
         if (!row.archived) return false;
       } else {
