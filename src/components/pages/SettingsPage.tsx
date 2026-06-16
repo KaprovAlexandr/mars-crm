@@ -686,9 +686,6 @@ function EmployeesSection({
             </tbody>
           </table>
         </div>
-        <div className="px-4 pb-1 pt-2">
-          <div className={`h-1 rounded-full ${isDarkTheme ? "bg-[#242D3F]" : "bg-[#EEEDF0]"}`} />
-        </div>
       </div>
 
       <div className="relative flex flex-col gap-4 max-lg:gap-5 max-lg:pt-1 lg:flex-row lg:items-center lg:justify-between lg:gap-0 lg:pt-0">
@@ -1427,9 +1424,6 @@ function RolesSection({
               })}
             </tbody>
           </table>
-        </div>
-        <div className="px-4 pb-1 pt-2">
-          <div className={`h-1 rounded-full ${isDarkTheme ? "bg-[#242D3F]" : "bg-[#EEEDF0]"}`} />
         </div>
       </div>
 
