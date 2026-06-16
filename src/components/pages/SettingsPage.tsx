@@ -76,7 +76,7 @@ function SettingsSectionChipBar({
   isDarkTheme: boolean;
 }) {
   return (
-    <div className="inline-flex w-fit items-center gap-1 rounded-full p-1">
+    <div className="inline-flex w-fit max-w-full items-center gap-1 overflow-x-auto rounded-full p-1 [-webkit-overflow-scrolling:touch]">
       {SETTINGS_SECTIONS.map((tab) => {
         const isActive = active === tab.id;
         return (
@@ -538,10 +538,10 @@ function EmployeesSection({
   }, [employeeProfileModal, employeeProfileMounted]);
 
   return (
-    <>
-      <div className={`min-h-0 flex-1 overflow-hidden rounded-lg ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
-        <div className="h-full overflow-x-hidden overflow-y-hidden">
-          <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 max-lg:gap-5">
+      <div className={`@container min-h-0 flex-1 overflow-hidden rounded-lg max-lg:min-h-[240px] max-lg:flex-none lg:flex-1 ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
+        <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+          <table className="w-full min-w-[760px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
             <colgroup>
               <col className="w-[5%]" />
               <col className="w-[32%]" />
@@ -551,7 +551,7 @@ function EmployeesSection({
               <col className="w-[4%]" />
             </colgroup>
             <thead
-              className={`text-left text-[16px] font-medium tracking-[-0.04em] ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}
+              className={`text-left text-[15px] font-medium leading-tight tracking-[-0.015em] whitespace-normal @[1280px]:text-[16px] @[1280px]:tracking-[-0.04em] @[1280px]:whitespace-nowrap ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}
             >
               <tr>
                 <th className="rounded-l-[5px] px-4 py-2.5 align-middle font-medium">
@@ -691,14 +691,14 @@ function EmployeesSection({
         </div>
       </div>
 
-      <div className="relative flex items-center justify-between">
+      <div className="relative flex flex-col gap-4 max-lg:gap-5 max-lg:pt-1 lg:flex-row lg:items-center lg:justify-between lg:gap-0 lg:pt-0">
         <button
           type="button"
-          className={`rounded-[8px] px-2 py-1 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
+          className={`rounded-[8px] px-2 py-1 text-center text-[18px] font-bold tracking-[-0.04em] max-lg:w-full lg:w-auto lg:text-left lg:text-[20px] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
         >
           {selectedRowIds.size} / сотрудников
         </button>
-        <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[1] -translate-x-1/2 -translate-y-1/2 max-lg:relative max-lg:left-auto max-lg:top-auto max-lg:z-0 max-lg:translate-x-0 max-lg:translate-y-0 max-lg:pointer-events-auto max-lg:flex max-lg:w-full max-lg:justify-center lg:pointer-events-none lg:absolute lg:left-1/2 lg:top-1/2 lg:flex lg:w-auto lg:-translate-x-1/2 lg:-translate-y-1/2">
           <div className="pointer-events-auto flex items-center gap-2">
             <button
               type="button"
@@ -753,7 +753,7 @@ function EmployeesSection({
             </button>
           </div>
         </div>
-        <div className={`flex items-center gap-2 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
+        <div className={`flex w-full shrink-0 justify-center gap-2 text-center text-[16px] font-bold tracking-[-0.04em] max-lg:order-last lg:w-auto lg:justify-end lg:text-right lg:text-[20px] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
           <span>
             {pageFrom} — {pageTo} из {total}
           </span>
@@ -1126,7 +1126,7 @@ function EmployeesSection({
             document.body,
           )
         : null}
-    </>
+    </div>
   );
 }
 
@@ -1289,10 +1289,10 @@ function RolesSection({
   ];
 
   return (
-    <>
-      <div className={`min-h-0 flex-1 overflow-hidden rounded-lg ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
-        <div className="h-full overflow-x-hidden overflow-y-hidden">
-          <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 max-lg:gap-5">
+      <div className={`@container min-h-0 flex-1 overflow-hidden rounded-lg max-lg:min-h-[240px] max-lg:flex-none lg:flex-1 ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
+        <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+          <table className="w-full min-w-[920px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
             <colgroup>
               <col className="w-[5%]" />
               <col className="w-[22%]" />
@@ -1301,7 +1301,7 @@ function RolesSection({
               <col className="w-[22%]" />
               <col className="w-[4%]" />
             </colgroup>
-            <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
+            <thead className={`text-left text-[15px] font-medium leading-tight tracking-[-0.015em] whitespace-normal @[1280px]:text-[16px] @[1280px]:tracking-[-0.04em] @[1280px]:whitespace-nowrap ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
               <tr>
                 <th className="rounded-l-[5px] px-4 py-2.5 align-middle font-medium">
                   <span
@@ -1433,14 +1433,14 @@ function RolesSection({
         </div>
       </div>
 
-      <div className="relative flex items-center justify-between">
+      <div className="relative flex flex-col gap-4 max-lg:gap-5 max-lg:pt-1 lg:flex-row lg:items-center lg:justify-between lg:gap-0 lg:pt-0">
         <button
           type="button"
-          className={`rounded-[8px] px-2 py-1 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
+          className={`rounded-[8px] px-2 py-1 text-center text-[18px] font-bold tracking-[-0.04em] max-lg:w-full lg:w-auto lg:text-left lg:text-[20px] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
         >
           {selectedRowIds.size} / ролей
         </button>
-        <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
+        <div className="pointer-events-none absolute left-1/2 top-1/2 z-[1] -translate-x-1/2 -translate-y-1/2 max-lg:relative max-lg:left-auto max-lg:top-auto max-lg:z-0 max-lg:translate-x-0 max-lg:translate-y-0 max-lg:pointer-events-auto max-lg:flex max-lg:w-full max-lg:justify-center lg:pointer-events-none lg:absolute lg:left-1/2 lg:top-1/2 lg:flex lg:w-auto lg:-translate-x-1/2 lg:-translate-y-1/2">
           <div className="pointer-events-auto flex items-center gap-2">
             <button
               type="button"
@@ -1495,7 +1495,7 @@ function RolesSection({
             </button>
           </div>
         </div>
-        <div className={`flex items-center gap-2 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
+        <div className={`flex w-full shrink-0 justify-center gap-2 text-center text-[16px] font-bold tracking-[-0.04em] max-lg:order-last lg:w-auto lg:justify-end lg:text-right lg:text-[20px] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
           <span>
             {pageFrom} — {pageTo} из {total}
           </span>
@@ -1583,7 +1583,7 @@ function RolesSection({
             document.body,
           )
         : null}
-    </>
+    </div>
   );
 }
 
@@ -1710,34 +1710,34 @@ export function SettingsPage() {
   }, [editingRole]);
 
   return (
-    <div className={`h-screen w-screen overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
-      <div className="flex h-full w-full p-2">
+    <div className={`h-screen w-screen overflow-hidden max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
         <div
-          className={`flex h-full w-full rounded-[16px] p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
+          className={`flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
         >
           <MarsAppShellSidebar mobileLayout="requests" />
 
 
           <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
             <header
-              className={`mb-2 rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
+              className={`mb-2 rounded-[16px] border px-4 py-4 lg:px-5 lg:py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
             >
-              <div className="flex items-center gap-3">
-                <div className="flex items-baseline gap-2">
+              <div className="flex max-lg:flex-col max-lg:items-stretch max-lg:gap-4 items-center gap-3 lg:flex-row lg:items-center lg:gap-3">
+                <div className="flex min-w-0 flex-wrap items-baseline gap-2">
                   <h1
-                    className={`text-[36px] font-bold leading-[100%] tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}
+                    className={`text-[28px] font-bold leading-[100%] tracking-[-0.04em] max-lg:shrink-0 max-sm:text-[24px] lg:text-[32px] xl:text-[36px] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}
                   >
                     Настройки
                   </h1>
-                  <span className="text-[16px] font-medium tracking-[-0.04em] text-[#B4B4B6]">{settingsHeaderSubtitle(section, employeeRows.length)}</span>
+                  <span className="text-[14px] font-medium tracking-[-0.04em] text-[#B4B4B6] sm:text-[16px]">{settingsHeaderSubtitle(section, employeeRows.length)}</span>
                 </div>
-                <div className="ml-auto flex items-center gap-1.5">
-                  <div className="relative">
+                <div className="ml-auto flex w-full min-w-0 max-lg:ml-0 max-lg:flex-col max-lg:gap-2 sm:max-lg:flex-row sm:max-lg:flex-wrap items-stretch sm:max-lg:items-center lg:ml-auto lg:w-auto lg:flex-row lg:items-center lg:gap-1.5">
+                  <div className="relative w-full min-w-0 sm:max-lg:min-w-[200px] sm:max-lg:flex-1 lg:w-auto lg:flex-none">
                     <input
                       type="search"
                       value={employeeSearchQuery}
                       onChange={(e) => setEmployeeSearchQuery(e.target.value)}
-                      className={`h-12 w-[320px] rounded-[10px] border-[3px] px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] outline-none [color-scheme:light] [&::-webkit-search-cancel-button]:hidden ${
+                      className={`h-12 w-full min-w-0 rounded-[10px] border-[3px] px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] outline-none [color-scheme:light] [&::-webkit-search-cancel-button]:hidden lg:w-[280px] xl:w-[320px] ${
                         isDarkTheme
                           ? "border-[#2B3345] bg-[#0E1420] text-[#C9D2E8] placeholder:text-[#7C879F]"
                           : "border-[#E4E5E7] bg-white text-[#8A8A8A] placeholder:text-[#B5B5B5]"
@@ -1769,7 +1769,7 @@ export function SettingsPage() {
                         setEditingRole(null);
                         setRoleDrawerOpen(true);
                       }}
-                      className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-[#EC1C24] hover:bg-white hover:text-[#EC1C24]"
+                      className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                     >
                       Добавить роль
                     </button>
@@ -1777,7 +1777,7 @@ export function SettingsPage() {
                   <button
                     type="button"
                     onClick={handleExportAction}
-                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-black hover:bg-white hover:text-black"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                   >
                     Экспорт в Excel
                   </button>
@@ -1786,11 +1786,11 @@ export function SettingsPage() {
             </header>
 
             <section
-              className={`flex min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-hidden rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
+              className={`flex min-h-0 min-w-0 flex-1 flex-col gap-4 rounded-[16px] border px-4 py-4 max-lg:gap-4 lg:gap-5 lg:px-5 lg:py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
               aria-label="Содержимое настроек"
             >
-              <div className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-3">
-                <div className="flex flex-wrap items-center gap-6">
+              <div className="flex w-full flex-col gap-3 max-lg:gap-4 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between lg:gap-x-4 lg:gap-y-3">
+                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-4 lg:gap-6">
                   <SettingsSectionChipBar active={section} onChange={setSection} isDarkTheme={isDarkTheme} />
                   {section === "employees" ? (
                     <span
