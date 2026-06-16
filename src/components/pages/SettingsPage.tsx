@@ -540,7 +540,7 @@ function EmployeesSection({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 max-lg:gap-5">
       <div className={`@container min-h-0 flex-1 overflow-hidden rounded-lg max-lg:min-h-[240px] max-lg:flex-none lg:flex-1 ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
-        <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+        <div className="journal-table-scroll hide-scrollbar relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
           <table className="w-full min-w-[760px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
             <colgroup>
               <col className="w-[5%]" />
@@ -1288,7 +1288,7 @@ function RolesSection({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 max-lg:gap-5">
       <div className={`@container min-h-0 flex-1 overflow-hidden rounded-lg max-lg:min-h-[240px] max-lg:flex-none lg:flex-1 ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
-        <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+        <div className="journal-table-scroll hide-scrollbar relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
           <table className="w-full min-w-[920px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
             <colgroup>
               <col className="w-[5%]" />
