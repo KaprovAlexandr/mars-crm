@@ -1,10 +1,8 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
 import { RequestActionIconEdit, RequestActionIconStatus, RequestActionIconTrash } from "@/components/icons/RequestRowModalIcons";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 import { downloadFinanceSummaryPdf } from "@/lib/finance/exportFinanceSummaryPdf";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { WORK_ORDER_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
 import {
   isWorkOrdersRemoteEnabled,
   listWorkOrdersStorageRows,
@@ -449,6 +447,8 @@ const MASTER_PROFILE = { fullName: "Журавлёв Михаил Дмитрие
 const FALLBACK_WORK_ORDER_ID = "593423";
 const DEFAULT_MASTER_NAME = "Журавлёв М.";
 const workOrderMasterOverrideStorageKey = "workOrderMasterOverrides";
+/** Должен совпадать с ключом в `WorkOrdersPage` — снимок строк таблицы (в т.ч. `archived`). */
+const WORK_ORDERS_ROWS_PERSIST_KEY = "workOrdersRowsPersistedV1";
 const masterFullNameByName: Record<string, string> = {
   "Алексеев Д.": "Алексеев Дмитрий Андреевич",
   "Семёнова Е.": "Семёнова Елена Викторовна",
@@ -519,6 +519,7 @@ type WorkOrderMeta = {
   status: string;
   dueDate: string;
   amount: string;
+  archived?: boolean;
 };
 
 function mapWorkOrderStorageToMeta(row: WorkOrderStorageRow): WorkOrderMeta {
@@ -531,6 +532,7 @@ function mapWorkOrderStorageToMeta(row: WorkOrderStorageRow): WorkOrderMeta {
     status: row.status ?? "Новый",
     dueDate: row.due_date,
     amount: row.amount,
+    archived: Boolean(row.archived),
   };
 }
 
@@ -546,6 +548,7 @@ function fallbackWorkOrderMeta(id: string): WorkOrderMeta {
       status: "Новый",
       dueDate: "—",
       amount: "0 ₽",
+      archived: false,
     };
   }
   return {
@@ -557,6 +560,7 @@ function fallbackWorkOrderMeta(id: string): WorkOrderMeta {
     status: row.status,
     dueDate: row.dueDate,
     amount: "0 ₽",
+    archived: false,
   };
 }
 
@@ -570,6 +574,7 @@ function mapSourceRowToMeta(row: (typeof workOrdersSourceRows)[number]): WorkOrd
     status: row.status,
     dueDate: row.dueDate,
     amount: "0 ₽",
+    archived: false,
   };
 }
 
@@ -699,6 +704,24 @@ function extractWorkOrderIdFromCardText(text: string): string | null {
   return match ? match[1] : null;
 }
 
+function readArchivedFromWorkOrdersRowsPersist(workOrderId: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const raw = window.localStorage.getItem(WORK_ORDERS_ROWS_PERSIST_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return false;
+    for (const item of parsed) {
+      if (item && typeof item === "object" && "id" in item && (item as { id: string }).id === workOrderId) {
+        return Boolean((item as { archived?: boolean }).archived);
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 function toTelHref(rawPhone: string): string {
   const normalized = rawPhone.replace(/[^\d+]/g, "");
   return `tel:${normalized}`;
@@ -826,7 +849,6 @@ export function WorkOrdersDetailsPage() {
   const [orderMeta, setOrderMeta] = useState<WorkOrderMeta>(() => fallbackWorkOrderMeta(currentWorkOrderId));
   const [orderMetaHydrated, setOrderMetaHydrated] = useState(false);
   const [allWorkOrdersMeta, setAllWorkOrdersMeta] = useState<WorkOrderMeta[]>(() => workOrdersSourceRows.map(mapSourceRowToMeta));
-  const isManager = CURRENT_USER_ROLE === "manager";
   const [activeTab, setActiveTab] = useState<"client" | "car">("client");
   const [displayedTab, setDisplayedTab] = useState<"client" | "car">("client");
   const [leftContentPhase, setLeftContentPhase] = useState<"idle" | "out" | "in">("idle");
@@ -992,7 +1014,12 @@ export function WorkOrdersDetailsPage() {
     return allWorkOrdersMeta
       .filter((row) => {
         if (row.master !== assignedMasterName) return false;
-        return row.status === "Новый" || row.status === "В работе" || row.status === "Ожидание запчастей";
+        return (
+          row.status === "Новый" ||
+          row.status === "В работе" ||
+          row.status === "Ожидание запчастей" ||
+          row.status === "Готово"
+        );
       })
       .map((row) => ({
         type: "Заказ-наряд",
@@ -1597,8 +1624,13 @@ export function WorkOrdersDetailsPage() {
   function navigateToWorkOrderFromCard(text: string) {
     const workOrderId = extractWorkOrderIdFromCardText(text);
     if (!workOrderId) return;
+    const meta = allWorkOrdersMeta.find((r) => r.id === workOrderId);
+    const inArchive = Boolean(meta?.archived) || readArchivedFromWorkOrdersRowsPersist(workOrderId);
     window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, workOrderId);
-    navigate(`/work-orders?workOrder=${workOrderId}`);
+    const qs = new URLSearchParams();
+    qs.set("workOrder", workOrderId);
+    if (inArchive) qs.set("archive", "1");
+    navigate(`/work-orders?${qs.toString()}`);
   }
 
   function triggerDocumentUpload() {
@@ -1697,46 +1729,24 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
   }
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.02em]">
-      <div className="flex h-full w-full p-2">
-        <div className="flex h-full w-full rounded-[16px] bg-black p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+    <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.02em] max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden">
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
+        <div className="flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] bg-black p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
+          <MarsAppShellSidebar mobileLayout="requests" />
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
-              <div className="flex items-center gap-3">
-                <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.02em] text-[#111826]">{`Заказ-наряд №${currentWorkOrderId}`}</h1>
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
+            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 lg:px-5 lg:py-5">
+              <div className="flex items-center gap-3 max-lg:flex-col max-lg:items-stretch max-lg:gap-3 lg:flex-row lg:items-center">
+                <h1 className="max-w-full shrink-0 truncate whitespace-nowrap text-[28px] font-bold leading-[100%] tracking-[-0.02em] text-[#111826] max-sm:text-[22px] lg:text-[30px] xl:text-[36px]">{`Заказ-наряд №${currentWorkOrderId}`}</h1>
                 <span
-                  className="rounded-[10px] px-3 py-2 text-[16px] font-medium tracking-[-0.02em]"
+                  className="w-fit rounded-[10px] px-3 py-2 text-[16px] font-medium tracking-[-0.02em]"
                   style={{ backgroundColor: currentWorkOrderStatusColor, color: "#FFFFFF" }}
                 >
                   {currentWorkOrderStatus}
                 </span>
-                <div className="ml-auto flex items-center gap-1.5">
+                <div className="ml-auto flex w-full min-w-0 max-lg:ml-0 max-lg:flex-col max-lg:gap-2 sm:max-lg:flex-row sm:max-lg:flex-wrap items-stretch sm:max-lg:items-center lg:ml-auto lg:w-auto lg:flex-row lg:items-center lg:gap-1 xl:gap-1.5">
                   {(activeCarPanel === "orders" || activeCarPanel === "parts" || activeCarPanel === "documents") && (
-                    <div className="relative">
+                    <div className="relative w-full min-w-0 sm:max-lg:min-w-[200px] sm:max-lg:flex-1 lg:w-auto lg:flex-none">
                       <input
                         value={
                           activeCarPanel === "orders"
@@ -1751,7 +1761,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                           else if (activeCarPanel === "parts") setPartsSearchQuery(v);
                           else setDocumentsSearchQuery(v);
                         }}
-                        className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                        className="h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.02em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden lg:w-[280px] xl:w-[320px]"
                         placeholder={
                           activeCarPanel === "orders"
                             ? "Поиск работы..."
@@ -1798,7 +1808,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                   )}
                   <button
                     type="button"
-                    className="h-12 cursor-pointer rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.02em] text-white"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.02em] text-white max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                     aria-label="Позвонить клиенту"
                     onClick={() => {
                       const phoneField = clientFields.find((f) => f.label === "Телефон");
@@ -1825,8 +1835,8 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
               </div>
             </header>
 
-            <section className="relative flex min-h-0 flex-1 gap-2">
-              <section className="relative z-20 w-[40%] min-w-[360px] rounded-[16px] bg-white p-6">
+            <section className="relative flex min-h-0 flex-1 gap-2 max-lg:h-auto max-lg:flex-col lg:h-full">
+              <section className="relative z-20 w-[40%] min-w-[360px] rounded-[16px] bg-white p-6 max-lg:w-full max-lg:min-w-0 max-lg:p-4 md:max-lg:pb-24 lg:p-6">
                 <div className={leftContentMotionClass}>
                   <div
                     style={{ transitionDelay: "0ms" }}
@@ -1836,12 +1846,12 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                       <h1 className={`max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636] transition-opacity duration-150 ${identityVisibilityClass}`}>
                         {displayedTab === "client" ? (
                           <>
-                            <span className="block whitespace-nowrap">{displayClientFirstLine || " "}</span>
+                            <span className="block whitespace-nowrap max-sm:whitespace-normal [overflow-wrap:anywhere]">{displayClientFirstLine || " "}</span>
                             {displayClientSecondLine ? <span className="block">{displayClientSecondLine}</span> : <span className="block"> </span>}
                           </>
                         ) : (
                           <>
-                            <span className="block whitespace-nowrap">{carNameLines.first || " "}</span>
+                            <span className="block whitespace-nowrap max-sm:whitespace-normal [overflow-wrap:anywhere]">{carNameLines.first || " "}</span>
                             {carNameLines.second ? <span className="block">{carNameLines.second}</span> : null}
                           </>
                         )}
@@ -1875,7 +1885,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                   : `${(visibleFields.length - 1 - index) * 18}ms`,
                               transitionDuration: displayedTab === "client" ? "350ms" : "240ms",
                             }}
-                            className={`${isCommentField ? "col-span-2 h-[68px]" : "h-[68px]"} rounded-[10px] border-2 px-4 py-3 transition-all duration-350 ease-out ${
+                            className={`${isCommentField ? "col-span-2 h-auto min-h-[68px] lg:h-[68px]" : "h-auto min-h-[68px] lg:h-[68px]"} rounded-[10px] border-2 px-4 py-3 transition-all duration-350 ease-out ${
                               isEditingFields ? "border-[#EC1C24] bg-white" : "border-transparent bg-[#F3F3F5]"
                             }`}
                           >
@@ -1902,7 +1912,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                 className="mt-1 block w-full bg-transparent text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352] outline-none"
                               />
                             ) : (
-                              <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">{field.value}</p>
+                              <p className="mt-1 whitespace-normal break-words text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352] [overflow-wrap:anywhere]">{field.value}</p>
                             )}
                           </div>
                         );
@@ -1911,15 +1921,15 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                   </div>
                   <div className="mt-[50px]" />
                 </div>
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 inline-grid grid-cols-2 rounded-full bg-[#11131D] p-1 text-[12px] shadow-[0_8px_24px_-14px_rgba(0,0,0,0.8)]">
+                <div className="absolute bottom-4 left-1/2 w-[272px] -translate-x-1/2 max-sm:static max-sm:mt-10 max-sm:mx-auto max-sm:w-[216px] max-sm:translate-x-0 md:max-lg:bottom-8 inline-grid grid-cols-2 rounded-full bg-[#11131D] p-1 text-[12px] shadow-[0_8px_24px_-14px_rgba(0,0,0,0.8)]">
                   <span
-                    className={`absolute left-1 top-1 bottom-1 z-0 w-[132px] rounded-full bg-[#EC1C24] shadow-[0_6px_14px_-8px_rgba(236,28,36,0.85)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-                      activeTab === "client" ? "translate-x-0" : "translate-x-[132px]"
+                    className={`absolute left-1 top-1 bottom-1 z-0 w-[calc(50%-4px)] rounded-full bg-[#EC1C24] shadow-[0_6px_14px_-8px_rgba(236,28,36,0.85)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+                      activeTab === "client" ? "translate-x-0" : "translate-x-full"
                     }`}
                   />
                   <button
                     onClick={() => setActiveTab("client")}
-                    className={`relative z-10 w-[132px] rounded-full px-5 py-2 text-center text-[16px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                    className={`relative z-10 w-[132px] max-sm:w-[108px] rounded-full px-3 py-2 text-center text-[15px] max-sm:text-[14px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
                       activeTab === "client" ? "text-white" : "text-white/80 hover:text-white"
                     }`}
                   >
@@ -1927,7 +1937,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                   </button>
                   <button
                     onClick={() => setActiveTab("car")}
-                    className={`relative z-10 w-[132px] rounded-full px-5 py-2 text-center text-[16px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                    className={`relative z-10 w-[132px] max-sm:w-[108px] rounded-full px-3 py-2 text-center text-[15px] max-sm:text-[14px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
                       activeTab === "car" ? "text-white" : "text-white/80 hover:text-white"
                     }`}
                   >
@@ -1936,16 +1946,17 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                 </div>
               </section>
 
-              <section className="relative z-20 min-w-0 flex-1 rounded-t-[16px] rounded-b-none bg-white p-6">
+              <section className="relative z-20 min-w-0 flex-1 rounded-[16px] bg-white p-6 max-lg:w-full max-lg:p-4 max-sm:p-2 lg:p-6">
                 <div className="flex h-full min-h-0 flex-col">
-                  <div className="inline-flex w-fit items-center gap-1 rounded-full p-1">
-                    {[
+                  <div className="w-full">
+                    <div className="flex w-full flex-wrap items-center gap-1 rounded-full p-1">
+                      {[
                       { label: "Работы", value: "orders" as const },
                       { label: "Запчасти", value: "parts" as const },
                       { label: "Документы", value: "documents" as const },
                       { label: "Фото автомобиля", value: "photos" as const },
                       { label: "Финансовая сводка", value: "finance" as const },
-                    ].map((tab) => (
+                      ].map((tab) => (
                       <button
                         key={tab.label}
                         type="button"
@@ -1962,22 +1973,23 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                       >
                         {tab.label}
                       </button>
-                    ))}
+                      ))}
+                    </div>
                   </div>
 
                   <>
                     {activeCarPanel === "documents" ? (
-                        <article className="relative order-2 mt-[107px] min-h-0 flex-1 rounded-[12px] bg-transparent">
-                          <div className="absolute left-0 right-0 top-0 -translate-y-full pb-3">
-                            <div className="flex w-full flex-wrap items-center justify-between gap-3">
+                        <article className="relative order-2 mt-10 min-h-0 flex-1 rounded-[12px] bg-transparent max-lg:relative max-lg:mt-8 lg:mt-[107px]">
+                          <div className="absolute left-0 right-0 top-0 -translate-y-full pb-3 max-lg:static max-lg:translate-y-0 max-lg:pb-3 lg:absolute lg:-translate-y-full">
+                            <div className="flex w-full flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
                               <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
                                 Документы{" "}
                                 <span className="tabular-nums text-[#888888]">
                                   ({carDocumentsCurrent.length + carDocumentsArchived.length})
                                 </span>
                               </h3>
-                              <div className="ml-auto flex flex-wrap items-center pl-1">
-                                <div className="flex items-center gap-6">
+                              <div className="flex w-full flex-col gap-3 sm:ml-auto sm:w-auto sm:flex-row sm:flex-wrap sm:items-center sm:pl-1">
+                                <div className="flex flex-wrap items-center gap-4 sm:gap-6">
                                   <button
                                     type="button"
                                     onClick={() => {
@@ -2016,14 +2028,14 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                   type="button"
                                   onClick={triggerDocumentUpload}
                                   aria-label="Загрузить документ"
-                                  className="ml-[50px] shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
+                                  className="w-full shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white sm:ml-[50px] sm:w-auto max-sm:ml-0"
                                 >
                                   Загрузить документ
                                 </button>
                               </div>
                             </div>
                           </div>
-                          <div className="hide-scrollbar min-h-0 min-w-0 max-h-[598px] space-y-4 overflow-y-auto overflow-x-hidden scroll-smooth rounded-lg bg-transparent">
+                          <div className="hide-scrollbar min-h-0 min-w-0 max-h-[min(65vh,598px)] space-y-4 overflow-y-auto overflow-x-hidden scroll-smooth rounded-lg bg-transparent lg:max-h-[598px]">
                             {documentsScope === "archived" && carDocumentsArchived.length === 0 ? (
                               <div className="flex min-h-[200px] items-center justify-center rounded-[12px] bg-[#F3F3F5] px-4 py-10 text-center text-[15px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
                                 В архиве пока нет документов
@@ -2081,7 +2093,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                               <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Ответственный мастер</h3>
                             </div>
                           </div>
-                          <div className="hide-scrollbar flex min-h-0 min-w-0 max-h-[598px] flex-col gap-4 overflow-y-auto overflow-x-hidden scroll-smooth rounded-t-lg rounded-b-none bg-transparent">
+                          <div className="flex min-h-0 min-w-0 flex-col gap-4 overflow-x-hidden rounded-t-lg rounded-b-none bg-transparent">
                             <article
                               className="flex cursor-pointer items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3"
                               onClick={() => {
@@ -2116,12 +2128,12 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                             </article>
 
                             <div className="mt-[28px] min-h-0 min-w-0 flex-1 rounded-t-[12px] rounded-b-none bg-white">
-                              <div className="flex items-center">
-                                <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
-                                  Работы <span className="text-[#888888]">({totalWorksCount})</span>
-                                </h3>
-                                <div className="ml-auto flex flex-wrap items-center pl-1">
-                                  <div className="flex items-center gap-6">
+                              <div className="w-full min-w-0 max-w-full overflow-hidden">
+                                <div className="grid min-w-0 grid-cols-[auto_1fr_auto] items-center gap-2 max-sm:flex max-sm:flex-col max-sm:items-stretch lg:gap-4">
+                                  <h3 className="shrink-0 whitespace-nowrap text-[20px] font-semibold tracking-[-0.02em] text-[#111826] lg:text-[24px]">
+                                    Работы <span className="text-[#888888]">({totalWorksCount})</span>
+                                  </h3>
+                                  <div className="ml-1 flex min-w-0 flex-nowrap items-center justify-center gap-2 max-sm:ml-0 max-sm:mt-2 max-sm:flex-wrap max-sm:justify-start lg:ml-2 lg:gap-4">
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -2129,10 +2141,10 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                         window.sessionStorage.removeItem("workFocusId");
                                         setWorksScope("current");
                                       }}
-                                      className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                      className="flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 text-[14px] font-medium tracking-[-0.04em] text-black lg:gap-2 lg:text-[16px]"
                                     >
                                       <ClientsStyleCheckboxBox checked={worksScope === "current"} />
-                                      <span>Текущие</span>
+                                      <span className="truncate">Текущие</span>
                                       <span className="tabular-nums text-[#7D7D7D]">({currentWorks.length})</span>
                                     </button>
                                     <button
@@ -2142,10 +2154,10 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                         window.sessionStorage.removeItem("workFocusId");
                                         setWorksScope("completed");
                                       }}
-                                      className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                      className="flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 text-[14px] font-medium tracking-[-0.04em] text-black lg:gap-2 lg:text-[16px]"
                                     >
                                       <ClientsStyleCheckboxBox checked={worksScope === "completed"} />
-                                      <span>Завершенные</span>
+                                      <span className="truncate">Завершенные</span>
                                       <span className="tabular-nums text-[#7D7D7D]">({completedWorksData.length})</span>
                                     </button>
                                     <button
@@ -2155,10 +2167,10 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                         window.sessionStorage.removeItem("workFocusId");
                                         setWorksScope("archived");
                                       }}
-                                      className="flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em] text-black"
+                                      className="flex min-w-0 shrink-0 cursor-pointer items-center gap-1.5 text-[14px] font-medium tracking-[-0.04em] text-black lg:gap-2 lg:text-[16px]"
                                     >
                                       <ClientsStyleCheckboxBox checked={worksScope === "archived"} />
-                                      <span>Архив</span>
+                                      <span className="truncate">Архив</span>
                                       <span className="tabular-nums text-[#7D7D7D]">({archivedWorksData.length})</span>
                                     </button>
                                   </div>
@@ -2170,7 +2182,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                       setAddCatalogTarget("works");
                                       setAddWorkModalOpen(true);
                                     }}
-                                    className="ml-[60px] shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
+                                    className="ml-2 h-12 min-h-[48px] shrink-0 cursor-pointer whitespace-nowrap rounded-[10px] bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white max-sm:ml-0 max-sm:mt-2 lg:ml-4 lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                                   >
                                     Добавить работу
                                   </button>
@@ -2274,15 +2286,15 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                         <article className="relative order-2 mt-[50px] flex min-h-0 flex-1 flex-col rounded-t-[12px] rounded-b-none bg-transparent">
                           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-lg rounded-b-none bg-transparent">
                             <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-t-[12px] rounded-b-none bg-white">
-                              <div className="flex shrink-0 items-center">
+                              <div className="flex shrink-0 items-center max-lg:flex-col max-lg:items-stretch max-lg:gap-3">
                                 <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">
                                   Запчасти{" "}
                                   <span className="text-[#888888]">
                                     ({partsCurrentData.length + partsArchivedData.length})
                                   </span>
                                 </h3>
-                                <div className="ml-auto flex flex-wrap items-center pl-1">
-                                  <div className="flex items-center gap-6">
+                                <div className="ml-auto flex w-full flex-col gap-2 pl-1 max-lg:items-stretch lg:w-auto lg:flex-row lg:flex-wrap lg:items-center">
+                                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                                     <button
                                       type="button"
                                       onClick={() => {
@@ -2318,7 +2330,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                       setAddCatalogTarget("parts");
                                       setAddWorkModalOpen(true);
                                     }}
-                                    className="ml-[50px] shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white"
+                                    className="ml-0 shrink-0 cursor-pointer rounded-[10px] bg-black px-[16px] py-[14px] text-[16px] font-medium leading-none tracking-[-0.04em] text-white max-lg:w-full sm:max-lg:w-auto lg:ml-[50px]"
                                   >
                                     Добавить запчасть
                                   </button>
@@ -2556,9 +2568,9 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
               role="presentation"
               onClick={() => setEmployeeProfileModal(null)}
             >
-              <div className="ml-auto flex h-full max-h-screen justify-end" onClick={(e) => e.stopPropagation()}>
+              <div className="ml-auto flex h-full w-full max-h-screen justify-end lg:w-auto" onClick={(e) => e.stopPropagation()}>
                 <div
-                  className="relative flex h-full shrink-0"
+                  className="relative flex h-full min-w-0 w-full shrink-0 lg:w-auto"
                   style={{
                     transform: employeeProfileActive ? "translate3d(0, 0, 0)" : "translate3d(100%, 0, 0)",
                     transition: addWorkModalActive
@@ -2573,7 +2585,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                   <button
                     type="button"
                     onClick={() => setEmployeeProfileModal(null)}
-                    className="absolute right-full top-8 z-10 mr-3 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#E8E8E8] bg-white text-[#111111] shadow-[0_8px_24px_-4px_rgba(0,0,0,0.18)] transition hover:bg-[#F7F7F7]"
+                    className="absolute left-4 top-6 z-10 flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-[#E8E8E8] bg-white text-[#111111] shadow-[0_8px_24px_-4px_rgba(0,0,0,0.18)] transition hover:bg-[#F7F7F7] max-lg:left-5 max-lg:top-[14px] lg:left-auto lg:right-full lg:top-8 lg:mr-3"
                     aria-label="Закрыть профиль сотрудника"
                   >
                     <svg viewBox="0 0 24 24" fill="none" className="h-5 w-5" aria-hidden>
@@ -2584,27 +2596,27 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                     role="dialog"
                     aria-modal="true"
                     aria-labelledby="employee-profile-title"
-                    className="flex h-full w-[min(900px,58vw)] min-w-[380px] max-w-[min(1040px,calc(100vw-48px))] flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)]"
+                    className="flex h-full min-w-0 w-full max-w-none flex-col border-l border-[#E6E6E6] bg-white tracking-[-0.04em] shadow-[-16px_0_48px_-12px_rgba(0,0,0,0.2)] lg:max-w-[min(1040px,calc(100vw-48px))] lg:w-[min(900px,58vw)] lg:min-w-[380px]"
                   >
-                    <div className="flex items-center gap-3 border-b border-[#EFEFEF] px-5 py-4">
-                      <h2 id="employee-profile-title" className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">
+                    <div className="flex min-w-0 items-center gap-3 border-b border-[#EFEFEF] py-4 pl-[4.75rem] pr-4 lg:px-5">
+                      <h2 id="employee-profile-title" className="min-w-0 text-[22px] font-bold leading-tight tracking-[-0.04em] text-[#111826] lg:text-[36px]">
                         Профиль мастера
                       </h2>
                     </div>
-                    <div className="min-h-0 flex-1 overflow-y-auto scroll-smooth p-5">
+                    <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden scroll-smooth p-4 sm:p-5">
                       {employeeProfileTab === "main" ? (
-                        <section className="relative min-h-0 rounded-[16px] bg-white">
-                          <div className="flex items-start justify-between gap-4">
-                            <div>
-                              <h1 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
-                                <span className="block whitespace-nowrap">{displayMasterFirstLine || " "}</span>
-                                <span className="block">{displayMasterSecondLine || " "}</span>
+                        <section className="relative min-h-0 min-w-0 rounded-[16px] bg-white">
+                          <div className="flex flex-col gap-4 min-[480px]:flex-row min-[480px]:items-start min-[480px]:justify-between">
+                            <div className="min-w-0 flex-1">
+                              <h1 className="max-w-full text-[28px] font-semibold leading-[1.05] tracking-[-0.03em] text-[#202636] sm:text-[38px] lg:max-w-[420px] lg:text-[52px] lg:leading-[0.98]">
+                                <span className="block sm:whitespace-nowrap [overflow-wrap:anywhere]">{displayMasterFirstLine || " "}</span>
+                                <span className="block break-words [overflow-wrap:anywhere]">{displayMasterSecondLine || " "}</span>
                               </h1>
                             </div>
-                            <img src={assignedMasterPhotoLarge} alt={`Фото профиля: ${assignedMasterFullName}`} className="h-[72px] w-[72px] rounded-full object-cover" />
+                            <img src={assignedMasterPhotoLarge} alt={`Фото профиля: ${assignedMasterFullName}`} className="h-[64px] w-[64px] shrink-0 self-start rounded-full object-cover sm:h-[72px] sm:w-[72px]" />
                           </div>
                           <div className="mt-[50px]">
-                            <div className="grid grid-cols-2 gap-x-3 gap-y-4">
+                            <div className="grid grid-cols-1 gap-x-3 gap-y-4 min-[440px]:grid-cols-2">
                               {[
                                 { label: "Дата рождения", value: assignedMasterProfileMeta.birthDate },
                                 { label: "Пол", value: assignedMasterProfileMeta.gender },
@@ -2624,22 +2636,22 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                           </div>
                         </section>
                       ) : employeeProfileTab === "kpi" ? (
-                        <section className="min-h-0 rounded-[16px] bg-white">
-                          <div className="grid grid-cols-2 gap-3">
+                        <section className="min-h-0 min-w-0 rounded-[16px] bg-white">
+                          <div className="grid grid-cols-1 gap-3 min-[460px]:grid-cols-2">
                             {employeeKpiCards.map((card) => (
-                              <article key={card.title} className="flex h-[128px] flex-col rounded-[12px] bg-[#F3F3F5] px-4 py-3">
-                                <p className="text-[16px] font-medium leading-none tracking-[-0.04em] text-[#1D2330]">{card.title}</p>
-                                <div className="mt-auto">
-                                  <p className="text-[32px] font-medium leading-none tracking-[-0.04em] text-[#E00919]">{card.value}</p>
-                                  <p className="mt-1 text-[13px] font-medium tracking-[-0.04em] text-[#6F7785]">{card.note}</p>
+                              <article key={card.title} className="flex min-h-[112px] min-w-0 flex-col rounded-[12px] bg-[#F3F3F5] px-3 py-3 sm:h-[128px] sm:px-4">
+                                <p className="min-w-0 text-[14px] font-medium leading-tight tracking-[-0.04em] text-[#1D2330] sm:text-[16px] sm:leading-none">{card.title}</p>
+                                <div className="mt-auto min-w-0 pt-2">
+                                  <p className="tabular-nums text-[22px] font-medium leading-none tracking-[-0.04em] text-[#E00919] max-[420px]:break-all sm:text-[26px] lg:text-[28px] xl:text-[32px] [overflow-wrap:anywhere]">{card.value}</p>
+                                  <p className="mt-1 min-w-0 break-words text-[12px] font-medium tracking-[-0.04em] text-[#6F7785] sm:text-[13px]">{card.note}</p>
                                 </div>
                               </article>
                             ))}
                           </div>
                         </section>
                       ) : (
-                        <section className="rounded-[16px] bg-white">
-                          <div className="inline-flex w-fit items-center gap-1 rounded-full p-1">
+                        <section className="min-w-0 rounded-[16px] bg-white">
+                          <div className="inline-flex max-w-full flex-wrap items-center gap-1 rounded-full p-1">
                             {[
                               { id: "active" as const, label: "Активные" },
                               { id: "recentlyDone" as const, label: "Недавно завершенные" },
@@ -2661,11 +2673,11 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                   const [titlePart, ...restParts] = item.text.split(" · ");
                                   const detailsPart = restParts.join(" · ");
                                   return (
-                                    <article key={item.text} className="flex items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3">
+                                    <article key={item.text} className="flex min-w-0 items-center gap-2 rounded-[12px] bg-[#F3F3F5] px-3 py-3 sm:gap-3 sm:px-4">
                                       <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
                                         <img src={item.icon} alt="" className="h-5 w-5" />
                                       </span>
-                                      <p className="text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">
+                                      <p className="min-w-0 flex-1 break-words text-[15px] font-medium leading-[1.25] tracking-[-0.02em] text-[#7D7D7D] sm:text-[18px] sm:leading-[1.15] lg:text-[20px] lg:leading-[1.1] [overflow-wrap:anywhere]">
                                         <span className="text-[#111826]">{titlePart}</span>
                                         {detailsPart ? ` · ${detailsPart}` : ""}
                                       </p>
@@ -2692,11 +2704,11 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                                   const [titlePart, ...restParts] = item.text.split(" · ");
                                   const detailsPart = restParts.join(" · ");
                                   return (
-                                    <article key={item.text} className="flex items-center gap-3 rounded-[12px] bg-[#F3F3F5] px-4 py-3">
+                                    <article key={item.text} className="flex min-w-0 items-center gap-2 rounded-[12px] bg-[#F3F3F5] px-3 py-3 sm:gap-3 sm:px-4">
                                       <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center">
                                         <img src={item.icon} alt="" className="h-5 w-5" />
                                       </span>
-                                      <p className="text-[20px] font-medium leading-[1.1] tracking-[-0.02em] text-[#7D7D7D]">
+                                      <p className="min-w-0 flex-1 break-words text-[15px] font-medium leading-[1.25] tracking-[-0.02em] text-[#7D7D7D] sm:text-[18px] sm:leading-[1.15] lg:text-[20px] lg:leading-[1.1] [overflow-wrap:anywhere]">
                                         <span className="text-[#111826]">{titlePart}</span>
                                         {detailsPart ? ` · ${detailsPart}` : ""}
                                       </p>
@@ -2720,18 +2732,18 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                         </section>
                       )}
                     </div>
-                    <div className="shrink-0 px-5 pb-5">
-                      <div className="flex justify-center">
-                        <div className="relative inline-grid grid-cols-3 rounded-full bg-[#11131D] p-1 text-[12px] shadow-[0_8px_24px_-14px_rgba(0,0,0,0.8)]">
+                    <div className="shrink-0 px-3 pb-4 pt-1 sm:px-5 sm:pb-5">
+                      <div className="flex w-full justify-center">
+                        <div className="relative grid w-full max-w-[min(100%,420px)] grid-cols-3 rounded-full bg-[#11131D] p-1 text-[12px] shadow-[0_8px_24px_-14px_rgba(0,0,0,0.8)] sm:max-w-[420px]">
                           <span
-                            className={`absolute left-1 top-1 bottom-1 z-0 w-[136px] rounded-full bg-[#EC1C24] shadow-[0_6px_14px_-8px_rgba(236,28,36,0.85)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-                              employeeProfileTab === "main" ? "translate-x-0" : employeeProfileTab === "kpi" ? "translate-x-[136px]" : "translate-x-[272px]"
+                            className={`absolute left-1 top-1 bottom-1 z-0 w-[calc((100%-8px)/3)] rounded-full bg-[#EC1C24] shadow-[0_6px_14px_-8px_rgba(236,28,36,0.85)] transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform ${
+                              employeeProfileTab === "main" ? "translate-x-0" : employeeProfileTab === "kpi" ? "translate-x-full" : "translate-x-[200%]"
                             }`}
                           />
                           <button
                             type="button"
                             onClick={() => setEmployeeProfileTab("main")}
-                            className={`relative z-10 w-[136px] whitespace-nowrap rounded-full px-4 py-2 text-center text-[15px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                            className={`relative z-10 min-w-0 whitespace-normal rounded-full px-1.5 py-2 text-center text-[11px] font-bold leading-tight tracking-[-0.02em] transition-colors duration-300 sm:px-3 sm:text-[13px] md:text-[15px] ${
                               employeeProfileTab === "main" ? "text-white" : "text-white/80 hover:text-white"
                             }`}
                           >
@@ -2740,7 +2752,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                           <button
                             type="button"
                             onClick={() => setEmployeeProfileTab("kpi")}
-                            className={`relative z-10 w-[136px] whitespace-nowrap rounded-full px-4 py-2 text-center text-[15px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                            className={`relative z-10 min-w-0 whitespace-normal rounded-full px-1.5 py-2 text-center text-[11px] font-bold leading-tight tracking-[-0.02em] transition-colors duration-300 sm:px-3 sm:text-[13px] md:text-[15px] ${
                               employeeProfileTab === "kpi" ? "text-white" : "text-white/80 hover:text-white"
                             }`}
                           >
@@ -2749,7 +2761,7 @@ tfoot td{border-bottom:none;padding-top:18px;font-size:18px;font-weight:700;}
                           <button
                             type="button"
                             onClick={() => setEmployeeProfileTab("orders")}
-                            className={`relative z-10 w-[136px] whitespace-nowrap rounded-full px-4 py-2 text-center text-[15px] font-bold tracking-[-0.02em] transition-colors duration-300 ${
+                            className={`relative z-10 min-w-0 whitespace-normal rounded-full px-1.5 py-2 text-center text-[11px] font-bold leading-tight tracking-[-0.02em] transition-colors duration-300 sm:px-3 sm:text-[13px] md:text-[15px] ${
                               employeeProfileTab === "orders" ? "text-white" : "text-white/80 hover:text-white"
                             }`}
                           >

@@ -1,8 +1,6 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { WORK_ORDER_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
 import {
   insertWorkOrderStorageRow,
   isWorkOrdersRemoteEnabled,
@@ -345,6 +343,12 @@ export const workOrderRows: WorkOrderRow[] = [
   { id: "118390", client: "Егорова Мария Игоревна", car: "Toyota RAV4", plate: "К811КК777", master: "Гусева М.", masterPhoto: "https://i.pravatar.cc/80?img=25", status: "Закрыт", amount: "13 200 ₽", dueDate: "06.05.2026" },
   { id: "552701", client: "Киселёв Андрей Петрович", car: "BMW 320i", plate: "В777ВВ799", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "В работе", amount: "16 800 ₽", dueDate: "07.05.2026" },
   { id: "552702", client: "Лаврова Дарья Олеговна", car: "Skoda Rapid", plate: "Р333РР799", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "Закрыт", amount: "11 400 ₽", dueDate: "05.05.2026" },
+  { id: "881600", client: "Капров Александр Николаевич", car: "BMW M5", plate: "A21213X7", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "Закрыт", amount: "250 000 ₽", dueDate: "10.05.2026" },
+  { id: "881601", client: "Капров Александр Николаевич", car: "BMW M5", plate: "A21213X7", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "Закрыт", amount: "131 058 ₽", dueDate: "15.06.2026" },
+  { id: "881602", client: "Капров Александр Николаевич", car: "BMW M5", plate: "A21213X7", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "Закрыт", amount: "250 000 ₽", dueDate: "20.06.2026" },
+  { id: "881603", client: "Капров Александр Николаевич", car: "BMW M5", plate: "A21213X7", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "В работе", amount: "131 058 ₽", dueDate: "25.06.2026" },
+  { id: "881604", client: "Капров Александр Николаевич", car: "BMW M5", plate: "A21213X7", master: "Алексеев Д.", masterPhoto: "https://i.pravatar.cc/80?img=12", status: "В работе", amount: "250 000 ₽", dueDate: "28.06.2026" },
+  { id: "881605", client: "Капров Александр Николаевич", car: "BMW M5", plate: "A21213X7", master: "Журавлёв М.", masterPhoto: "https://i.pravatar.cc/80?img=41", status: "В работе", amount: "131 058 ₽", dueDate: "30.06.2026" },
 ];
 const masterPhotoByName: Record<string, string> = {
   "Алексеев Д.": "https://i.pravatar.cc/80?img=12",
@@ -396,7 +400,7 @@ function WorkOrdersTableDataRow({
     <tr
       ref={rowRef}
       onClick={onRowNavigate}
-      className={`border-[5px] border-[#EEEDF0] transition ${
+      className={`border-[5px] border-[#EEEDF0] transition [&_td]:align-middle ${
         isArchiving
           ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]"
           : ""
@@ -408,9 +412,9 @@ function WorkOrdersTableDataRow({
       style={highlightStyle}
       onAnimationEnd={(e) => onFlashAnimationEnd(e, row.id)}
     >
-      <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+      <td className="px-3 py-3 @[1280px]:px-4" onClick={(e) => e.stopPropagation()}>
         <span
-          className="inline-flex cursor-pointer select-none items-center"
+          className="inline-flex cursor-pointer select-none items-center justify-center"
           role="checkbox"
           aria-checked={isSelected}
           aria-label={`Выбрать заказ-наряд ${row.id}`}
@@ -419,37 +423,45 @@ function WorkOrdersTableDataRow({
           {workOrdersCheckboxBox(isSelected)}
         </span>
       </td>
-      <td className="px-4 py-3 text-black">
+      <td className="px-3 py-3 text-[15px] leading-snug text-black @[1280px]:px-4 @[1280px]:text-[16px] @[1280px]:leading-normal">
         <span className="inline-flex items-center gap-1.5">
           {row.urgent ? <span aria-label="Срочный заказ-наряд">🔥</span> : null}
           <span>{row.id}</span>
         </span>
       </td>
-      <td className="px-4 py-3 text-black">{row.client}</td>
-      <td className="px-4 py-3 text-black">{row.car}</td>
-      <td className="px-4 py-3 text-black">{row.plate}</td>
-      <td className="px-4 py-3 font-medium">
+      <td className="px-3 py-3 text-[15px] leading-snug text-black whitespace-normal break-words [overflow-wrap:anywhere] @[1280px]:px-4 @[1280px]:text-[16px] @[1280px]:leading-normal @[1280px]:whitespace-nowrap @[1280px]:break-normal">
+        {row.client}
+      </td>
+      <td className="px-3 py-3 text-[15px] leading-snug text-black whitespace-normal break-words [overflow-wrap:anywhere] @[1280px]:px-4 @[1280px]:text-[16px] @[1280px]:leading-normal @[1280px]:whitespace-nowrap @[1280px]:break-normal">
+        {row.car}
+      </td>
+      <td className="px-3 py-3 text-[15px] leading-normal text-black whitespace-normal break-all [overflow-wrap:anywhere] @[1280px]:px-4 @[1280px]:text-[16px] @[1280px]:whitespace-nowrap @[1280px]:break-normal">
+        {row.plate}
+      </td>
+      <td className="px-3 py-3 font-medium @[1280px]:px-4">
         <span className="inline-flex max-w-full items-center gap-2 text-black">
           <span
             className="h-2.5 w-2.5 shrink-0 rounded-full"
             style={{ backgroundColor: workOrderStatusColorMap[row.status] }}
           />
-          <span className="min-w-0 truncate text-[16px] font-medium text-black">{row.status}</span>
+          <span className="min-w-0 max-w-[12rem] truncate text-[15px] font-medium text-black @[1280px]:max-w-none @[1280px]:whitespace-nowrap @[1280px]:text-[16px]">
+            {row.status}
+          </span>
         </span>
       </td>
-      <td className="px-4 py-3 text-black">
+      <td className="px-3 py-3 text-[15px] text-black @[1280px]:px-4 @[1280px]:text-[16px]">
         <span className="inline-flex max-w-full items-center gap-1.5">
           <img
             src={row.masterPhoto}
             alt=""
-            className="h-[1em] w-[1em] shrink-0 rounded-full object-cover ring-1 ring-black/10"
+            className="h-[18px] w-[18px] shrink-0 rounded-full object-cover ring-1 ring-black/10 @[1280px]:h-[1em] @[1280px]:w-[1em]"
           />
-          <span className="min-w-0 truncate">{row.master}</span>
+          <span className="min-w-0 max-w-[10rem] truncate @[1280px]:max-w-none">{row.master}</span>
         </span>
       </td>
-      <td className="px-4 py-3 text-black">{row.dueDate}</td>
-      <td className="px-4 py-3 text-black">{row.amount}</td>
-      <td className="px-4 py-3 text-center text-[#A0A0A0]">
+      <td className="px-3 py-3 text-[15px] text-black @[1280px]:px-4 @[1280px]:text-[16px]">{row.dueDate}</td>
+      <td className="px-3 py-3 text-[15px] text-black @[1280px]:px-4 @[1280px]:text-[16px]">{row.amount}</td>
+      <td className="px-3 py-3 text-center text-[#A0A0A0] @[1280px]:px-4">
         <button
           type="button"
           className="cursor-pointer text-[#A0A0A0]"
@@ -470,7 +482,6 @@ function WorkOrdersTableDataRow({
 export function WorkOrdersPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const isManager = CURRENT_USER_ROLE === "manager";
   const [searchParams, setSearchParams] = useSearchParams();
   const [flashHighlightWorkOrderId, setFlashHighlightWorkOrderId] = useState<string | null>(null);
   const [flashHighlightNonce, setFlashHighlightNonce] = useState(0);
@@ -513,6 +524,8 @@ export function WorkOrdersPage() {
       };
     });
   });
+  /** Пока удалённый список не «дозрел», не считаем ?workOrder= несуществующим (иначе гонка: rows=[] сбрасывает query до fetch). */
+  const [remoteWorkOrdersListSettled, setRemoteWorkOrdersListSettled] = useState(() => !isWorkOrdersRemoteEnabled());
   useEffect(() => {
     if (!isWorkOrdersRemoteEnabled()) return;
     let cancelled = false;
@@ -524,6 +537,10 @@ export function WorkOrdersPage() {
         }
       } catch (error) {
         console.warn("Failed to load work orders from Supabase.", error);
+      } finally {
+        if (!cancelled) {
+          setRemoteWorkOrdersListSettled(true);
+        }
       }
     }
     void loadWorkOrdersFromSupabase();
@@ -1190,6 +1207,9 @@ export function WorkOrdersPage() {
     }
     const targetArchiveMode = searchParams.get("archive") === "1";
     if (!rows.some((r) => r.id === wid)) {
+      if (isWorkOrdersRemoteEnabled() && !remoteWorkOrdersListSettled) {
+        return;
+      }
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -1216,7 +1236,7 @@ export function WorkOrdersPage() {
     setDateToInput("");
     setStatusFilter(new Set(["Новый", "В работе", "Ожидание запчастей", "Готово", "Закрыт", "Отказ клиента"]));
     setMasterFilter(new Set([...new Set(rows.map((r) => r.master))]));
-  }, [searchParams, rows, setSearchParams]);
+  }, [searchParams, rows, setSearchParams, remoteWorkOrdersListSettled]);
 
   useLayoutEffect(() => {
     const wid = searchParams.get("workOrder");
@@ -1653,46 +1673,24 @@ export function WorkOrdersPage() {
   const switchMasterOptions = [...new Set(rows.map((row) => row.master).filter(Boolean))].sort((a, b) => a.localeCompare(b, "ru"));
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black">
-      <div className="flex h-full w-full p-2">
-        <div className="flex h-full w-full rounded-[16px] bg-black p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button onClick={() => navigate("/profile")} className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+    <div className="h-screen w-screen overflow-hidden bg-black max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden">
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
+        <div className="flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] bg-black p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
+          <MarsAppShellSidebar mobileLayout="requests" />
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
-              <div className="flex items-center gap-3">
-                <div className="flex items-baseline gap-2">
-                  <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Заказ-наряды</h1>
-                  <span className="text-[16px] font-bold tracking-[-0.04em] text-[#888888]">({workOrdersCount})</span>
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
+            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 lg:px-5 lg:py-5">
+              <div className="flex max-lg:flex-col max-lg:items-stretch max-lg:gap-4 items-center gap-3 lg:flex-row lg:items-center lg:gap-3">
+                <div className="flex min-w-0 items-baseline gap-2 whitespace-nowrap">
+                  <h1 className="text-[28px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826] max-sm:text-[24px] lg:text-[32px] xl:text-[36px]">Заказ-наряды</h1>
+                  <span className="shrink-0 text-[16px] font-bold tracking-[-0.04em] text-[#888888]">({workOrdersCount})</span>
                 </div>
-                <div className="ml-auto flex items-center gap-1.5">
-                  <div className="relative">
+                <div className="ml-auto flex w-full min-w-0 max-lg:ml-0 max-lg:flex-col max-lg:gap-2 sm:max-lg:flex-row sm:max-lg:flex-wrap items-stretch sm:max-lg:items-center lg:ml-auto lg:w-auto lg:flex-row lg:items-center lg:gap-1 xl:gap-1.5">
+                  <div className="relative w-full min-w-0 sm:max-lg:min-w-[200px] sm:max-lg:flex-1 lg:w-auto">
                     <input
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      className="h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden lg:w-[280px] xl:w-[320px]"
                       placeholder="Поиск по ID или ФИО..."
                       aria-label="Поиск по ID или ФИО..."
                     />
@@ -1712,14 +1710,14 @@ export function WorkOrdersPage() {
                   <button
                     type="button"
                     onClick={() => setCreateOrderModalOpen(true)}
-                    className="h-12 cursor-pointer rounded-[10px] bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                   >
                     Создать заказ-наряд
                   </button>
                   <button
                     type="button"
                     onClick={() => exportWorkOrdersToXlsx(noActiveFilters ? rows : sortedRows)}
-                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                   >
                     Экспорт в Excel
                   </button>
@@ -1727,7 +1725,7 @@ export function WorkOrdersPage() {
               </div>
             </header>
 
-            <section className="flex min-h-0 flex-1 flex-col gap-5 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
+            <section className="flex min-h-0 flex-1 flex-col gap-4 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 max-lg:gap-4 lg:gap-5 lg:px-5 lg:py-5">
               <div className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-3">
                 <div className="flex min-w-0 flex-wrap items-center gap-[10px] gap-y-3">
                   {[
@@ -1906,15 +1904,15 @@ export function WorkOrdersPage() {
                   type="button"
                   onClick={resetFilters}
                   disabled={noActiveFilters}
-                  className="inline-flex shrink-0 cursor-pointer items-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border"
+                  className="inline-flex w-full shrink-0 cursor-pointer items-center justify-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border disabled:cursor-not-allowed disabled:opacity-45 sm:w-auto sm:justify-start lg:w-auto"
                 >
                   Сбросить фильтры
                 </button>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-hidden rounded-lg bg-white">
-                <div className="h-full overflow-hidden">
-                  <table className="w-full table-fixed border-separate border-spacing-0 whitespace-nowrap text-[16px] font-medium tracking-[-0.04em]">
+              <div className="@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg bg-white max-lg:min-h-[240px] max-lg:flex-none lg:flex-1">
+                <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+                  <table className="w-full min-w-[1520px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
                     <colgroup>
                       <col className="w-[4%]" />
                       <col className="w-[9%]" />
@@ -1927,22 +1925,22 @@ export function WorkOrdersPage() {
                       <col className="w-[9%]" />
                       <col className="w-[4%]" />
                     </colgroup>
-                    <thead className="bg-[#F3F3F5] text-left text-[16px] font-medium tracking-[-0.04em] text-[#7D7D7D]">
+                    <thead className="bg-[#F3F3F5] text-left text-[15px] font-medium leading-tight tracking-[-0.015em] text-[#7D7D7D] whitespace-normal @[1280px]:text-[16px] @[1280px]:tracking-[-0.04em] @[1280px]:whitespace-nowrap">
                       <tr>
-                        <th className="rounded-l-[5px] px-4 py-2.5 font-medium">
+                        <th className="rounded-l-[5px] px-3 py-3 font-medium align-middle @[1280px]:px-4 @[1280px]:py-2.5">
                           <button type="button" onClick={toggleSelectAllOnPage} className="inline-flex cursor-pointer items-center">
                             {workOrdersCheckboxBox(allPageRowsSelected)}
                           </button>
                         </th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">ID<button type="button" onClick={() => toggleSort("id")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Клиент<button type="button" onClick={() => toggleSort("client")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Автомобиль<button type="button" onClick={() => toggleSort("car")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Гос. номер<button type="button" onClick={() => toggleSort("plate")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Статус<button type="button" onClick={() => toggleSort("status")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Мастер<button type="button" onClick={() => toggleSort("master")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Дата приема<button type="button" onClick={() => toggleSort("dueDate")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="px-4 py-2.5 font-medium"><span className="inline-flex items-center gap-2">Сумма<button type="button" onClick={() => toggleSort("amount")} className="cursor-pointer"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
-                        <th className="rounded-r-[5px] px-4 py-2.5 font-medium text-center">⋮</th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">ID<button type="button" onClick={() => toggleSort("id")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Клиент<button type="button" onClick={() => toggleSort("client")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Автомобиль<button type="button" onClick={() => toggleSort("car")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Гос. номер<button type="button" onClick={() => toggleSort("plate")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Статус<button type="button" onClick={() => toggleSort("status")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Мастер<button type="button" onClick={() => toggleSort("master")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Дата приема<button type="button" onClick={() => toggleSort("dueDate")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5"><span className="inline-flex items-center gap-2 font-medium">Сумма<button type="button" onClick={() => toggleSort("amount")} className="cursor-pointer shrink-0"><svg viewBox="0 0 28 28" fill="none" className="h-[14px] w-[14px] text-current"><path d="M5.9375 1.25L5.9375 26.25M5.9375 1.25L10.625 5.41667M5.9375 1.25L1.25 5.41667M26.25 22.0833L21.5625 26.25M21.5625 26.25L16.875 22.0833M21.5625 26.25L21.5625 1.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></span></th>
+                        <th className="rounded-r-[5px] px-3 py-3 text-center font-medium align-middle @[1280px]:px-4 @[1280px]:py-2.5">⋮</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1950,7 +1948,7 @@ export function WorkOrdersPage() {
                         <tr>
                           <td
                             colSpan={10}
-                            className="px-4 py-16 text-center text-[18px] font-medium tracking-[-0.04em] text-[#7D7D7D] whitespace-normal"
+                            className="px-3 py-16 text-center text-[18px] font-medium tracking-[-0.04em] text-[#7D7D7D] whitespace-normal @[1280px]:px-4"
                           >
                             Ничего не найдено
                           </td>
@@ -1982,15 +1980,14 @@ export function WorkOrdersPage() {
                     </tbody>
                   </table>
                 </div>
-                <div className="px-4 pb-1 pt-2"><div className="h-1 rounded-full bg-[#EEEDF0]" /></div>
               </div>
 
-              <div className="relative flex items-center justify-between">
-                <button className="rounded-[8px] bg-white px-2 py-1 text-[20px] font-bold tracking-[-0.04em] text-black">
+              <div className="relative flex flex-col gap-4 max-lg:gap-5 max-lg:pt-1 lg:flex-row lg:items-center lg:justify-between lg:gap-0 lg:pt-0">
+                <button className="rounded-[8px] bg-white px-2 py-1 text-center text-[18px] font-bold tracking-[-0.04em] text-black max-lg:w-full lg:w-auto lg:text-left lg:text-[20px]">
                   {selectedRowIds.size} / заказ-нарядов
                 </button>
-                <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                  <div className="pointer-events-auto flex items-center gap-2">
+                <div className="pointer-events-none absolute left-1/2 top-1/2 z-[1] -translate-x-1/2 -translate-y-1/2 max-lg:relative max-lg:left-auto max-lg:top-auto max-lg:z-0 max-lg:translate-x-0 max-lg:translate-y-0 max-lg:pointer-events-auto max-lg:flex max-lg:w-full max-lg:justify-center lg:pointer-events-none lg:absolute lg:left-1/2 lg:top-1/2 lg:flex lg:w-auto lg:-translate-x-1/2 lg:-translate-y-1/2">
+                  <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
@@ -2017,7 +2014,7 @@ export function WorkOrdersPage() {
                     </button>
                   </div>
                 </div>
-                <div className="flex items-center gap-2 text-[20px] font-bold tracking-[-0.04em] text-black">
+                <div className="flex w-full shrink-0 justify-center gap-2 text-center text-[16px] font-bold tracking-[-0.04em] text-black max-lg:order-last lg:w-auto lg:justify-end lg:text-right lg:text-[20px]">
                   <span>
                     {sortedRows.length === 0 ? "0 из 0" : `${pageStart + 1} — ${pageEnd} из ${sortedRows.length}`}
                   </span>

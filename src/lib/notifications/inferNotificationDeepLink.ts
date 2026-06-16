@@ -1,9 +1,13 @@
 import type { NotificationDeepLink, NotificationItem } from "@/lib/notifications/notificationTypes";
 
+/** Выставляется перед navigate на /documents?document=…; список документов подсвечивает строку только если armed совпал. */
+export const DOCUMENT_LIST_FLASH_ARMED_KEY = "documentListFlashArmed";
 /** Выставляется перед navigate на /work-orders?workOrder=…; список подсвечивает строку только если armed совпал (не при возврате по истории). */
 export const WORK_ORDER_LIST_FLASH_ARMED_KEY = "workOrderListFlashArmed";
 /** Выставляется перед navigate на /?request=…; список заявок подсвечивает строку только если armed совпал. */
 export const REQUEST_LIST_FLASH_ARMED_KEY = "requestListFlashArmed";
+/** Выставляется перед navigate на /journal?booking=…; журнал подсвечивает запись только если armed совпал. */
+export const BOOKING_LIST_FLASH_ARMED_KEY = "bookingListFlashArmed";
 
 /** Определить цель перехода из явного поля или из текста заголовка/описания. */
 export function inferNotificationDeepLink(n: Pick<NotificationItem, "title" | "description" | "deepLink">): NotificationDeepLink | null {

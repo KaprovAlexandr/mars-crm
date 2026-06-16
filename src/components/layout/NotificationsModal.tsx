@@ -12,12 +12,6 @@ import {
   subscribeInAppNotifications,
 } from "@/lib/notifications/inAppNotificationFeed";
 import {
-  buildNotificationNavigatePath,
-  inferNotificationDeepLink,
-  REQUEST_LIST_FLASH_ARMED_KEY,
-  WORK_ORDER_LIST_FLASH_ARMED_KEY,
-} from "@/lib/notifications/inferNotificationDeepLink";
-import {
   applyPersistedReadToNotifications,
   persistNotificationMarkedRead,
   persistNotificationsMarkedRead,
@@ -27,7 +21,6 @@ import type { NotificationItem, NotificationSection } from "@/lib/notifications/
 export type { NotificationDeepLink, NotificationItem, NotificationSection } from "@/lib/notifications/notificationTypes";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate } from "react-router-dom";
 
 const SECTION_LABEL: Record<NotificationSection, string> = {
   today: "Сегодня",
@@ -164,7 +157,6 @@ function BellInCircleIcon({ className }: { className?: string }) {
 }
 
 export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }: NotificationsModalProps) {
-  const navigate = useNavigate();
   const [list, setList] = useState<NotificationItem[]>(() => buildNotificationList(items));
   const [logList, setLogList] = useState<ActionLogEntry[]>(() => getActionLog());
   const [tab, setTab] = useState<TabId>("all");
@@ -299,16 +291,11 @@ export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }
     );
   }
 
-  function handleOpenNotification(n: NotificationItem) {
-    const link = inferNotificationDeepLink(n);
-    if (!link) return;
-    if (link.kind === "workOrder") {
-      window.sessionStorage.setItem(WORK_ORDER_LIST_FLASH_ARMED_KEY, link.workOrderId);
-    } else if (link.kind === "request") {
-      window.sessionStorage.setItem(REQUEST_LIST_FLASH_ARMED_KEY, link.requestId);
-    }
-    navigate(buildNotificationNavigatePath(link));
-    onClose();
+  function handleLeaveNotificationUnread(id: string) {
+    removePersistedNotificationRead(id);
+    setList((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, unread: true, showOpenButton: false } : n)),
+    );
   }
 
   if (!mounted || typeof document === "undefined") return null;
@@ -381,7 +368,7 @@ export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }
                   )}
                 </div>
 
-                <div className="flex items-center gap-1 border-b border-transparent">
+                <div className="hide-scrollbar flex items-center gap-1 border-b border-transparent max-sm:flex-nowrap max-sm:overflow-x-auto">
                   {(
                     [
                       { id: "all" as const, label: "Все" },
@@ -394,7 +381,7 @@ export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }
                       key={id}
                       type="button"
                       onClick={() => setTab(id)}
-                      className={`relative -mb-px px-3 pb-3 text-[14px] font-semibold transition ${
+                      className={`relative -mb-px shrink-0 whitespace-nowrap px-3 pb-3 text-[14px] font-semibold transition ${
                         tab === id ? "text-[#111111]" : "text-[#8A8A8A] hover:text-[#444]"
                       }`}
                     >
@@ -404,7 +391,7 @@ export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }
                       ) : null}
                     </button>
                   ))}
-                  <div className="ml-auto flex pb-2">
+                  <div className="ml-auto flex shrink-0 pb-2">
                     <button
                       type="button"
                       className="flex h-9 w-9 items-center justify-center rounded-lg text-[#8A8A8A] transition hover:bg-[#F5F5F5] hover:text-[#444444]"
@@ -512,14 +499,14 @@ export function NotificationsModal({ open, onClose, items = MOCK_NOTIFICATIONS }
                                     >
                                       <button
                                         type="button"
-                                        disabled={!inferNotificationDeepLink(n)}
-                                        className="rounded-lg bg-[#EC1C24] px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-[#d41920] disabled:cursor-not-allowed disabled:opacity-40"
+                                        className="rounded-lg bg-[#EC1C24] px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-[#d41920]"
+                                        aria-label="Оставить непрочитанным"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          handleOpenNotification(n);
+                                          handleLeaveNotificationUnread(n.id);
                                         }}
                                       >
-                                        Открыть
+                                        Оставить непрочитанным
                                       </button>
                                     </div>
                                   </div>

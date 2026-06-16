@@ -1,10 +1,8 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 import { appendJournalBookingSoonToFeed } from "@/lib/notifications/inAppNotificationFeed";
 import { appendUserActionLog } from "@/lib/notifications/actionActivityLog";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
-import { WORK_ORDER_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
+import { WORK_ORDER_LIST_FLASH_ARMED_KEY, BOOKING_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
 import {
   deleteJournalStorageRow,
   insertJournalStorageRow,
@@ -13,6 +11,8 @@ import {
   updateJournalStorageRows,
   type JournalStorageRow,
 } from "@/lib/data/journalDataSource";
+import { isClientsRemoteEnabled, listClientsStorageRows } from "@/lib/data/clientsDataSource";
+import { markRequestAsBooked } from "@/lib/data/requestsDataSource";
 import {
   RequestActionIconEdit,
   RequestActionIconGetJob,
@@ -27,6 +27,7 @@ import type { Booking, Service, Slot } from "../../lib/booking-journal/getAvaila
 import { getAvailableSlots, isSlotStillFree, slotKey } from "../../lib/booking-journal/getAvailableSlots";
 import type { Car, Client } from "../../lib/booking-journal/bookingClientsSearch";
 import { findClientsByNationalPhone, findClientsBySurname } from "../../lib/booking-journal/bookingClientsSearch";
+import { mergeApiClientsIntoJournalClients, mergeJournalClientLists } from "../../lib/booking-journal/journalClientsDirectory";
 import {
   displayRuPhoneComplete,
 } from "../../lib/booking-journal/ruPhoneMask";
@@ -703,7 +704,6 @@ const JOURNAL_NO_REMINDER_STATUSES = new Set<JournalBookingStatus>([
 
 export function BookingJournalPage() {
   const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
   const [searchParams, setSearchParams] = useSearchParams();
   const bookingHighlightId = searchParams.get("booking");
   const [flashBookingId, setFlashBookingId] = useState<string | null>(null);
@@ -727,6 +727,7 @@ export function BookingJournalPage() {
       return buildInitialRows();
     }
   });
+  const [journalRowsRemoteSettled, setJournalRowsRemoteSettled] = useState(() => !isJournalRemoteEnabled());
   const [journalViewDate, setJournalViewDate] = useState<string>(() => journalTodayYmd());
   const [sidebarCalendarMonth, setSidebarCalendarMonth] = useState<{ year: number; month: number }>(() => {
     const { y, m } = parseYmdLocal(journalTodayYmd());
@@ -736,12 +737,16 @@ export function BookingJournalPage() {
     if (typeof window === "undefined") return MOCK_JOURNAL_CLIENTS;
     try {
       const raw = window.sessionStorage.getItem(JOURNAL_CLIENTS_PERSIST_KEY);
-      if (!raw) return MOCK_JOURNAL_CLIENTS;
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as Client[]) : MOCK_JOURNAL_CLIENTS;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return mergeJournalClientLists(parsed as Client[], MOCK_JOURNAL_CLIENTS);
+        }
+      }
     } catch {
-      return MOCK_JOURNAL_CLIENTS;
+      // fall through to mock list
     }
+    return MOCK_JOURNAL_CLIENTS;
   });
 
   useEffect(() => {
@@ -756,9 +761,32 @@ export function BookingJournalPage() {
         }
       } catch (error) {
         console.warn("Failed to load journal bookings from Supabase, fallback to session rows.", error);
+      } finally {
+        if (!cancelled) {
+          setJournalRowsRemoteSettled(true);
+        }
       }
     }
     void loadJournalRowsFromSupabase();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isClientsRemoteEnabled()) return;
+    let cancelled = false;
+    async function loadJournalClientsFromApi() {
+      try {
+        const rows = await listClientsStorageRows();
+        if (!cancelled) {
+          setClients((prev) => mergeApiClientsIntoJournalClients(prev, rows));
+        }
+      } catch (error) {
+        console.warn("Failed to load clients for journal from API.", error);
+      }
+    }
+    void loadJournalClientsFromApi();
     return () => {
       cancelled = true;
     };
@@ -847,6 +875,7 @@ export function BookingJournalPage() {
   const [newClientCar, setNewClientCar] = useState("");
   const [isRequestBookingFlow, setIsRequestBookingFlow] = useState(false);
   const [requestBookingComment, setRequestBookingComment] = useState("");
+  const [requestBookingRequestId, setRequestBookingRequestId] = useState("");
   const requestBookingLaunchKeyRef = useRef<string>("");
   const [bookingCardActionsModal, setBookingCardActionsModal] = useState<BookingCard | null>(null);
   const [bookingStatusPickerForId, setBookingStatusPickerForId] = useState<string | null>(null);
@@ -962,6 +991,9 @@ export function BookingJournalPage() {
     }
     const row = journalRows.find((r) => r.id === bid);
     if (!row) {
+      if (isJournalRemoteEnabled() && !journalRowsRemoteSettled) {
+        return;
+      }
       setSearchParams(
         (prev) => {
           const next = new URLSearchParams(prev);
@@ -984,7 +1016,7 @@ export function BookingJournalPage() {
       const { y, m } = parseYmdLocal(day);
       setSidebarCalendarMonth({ year: y, month: m });
     }
-  }, [searchParams, journalRows, journalViewDate, setSearchParams]);
+  }, [searchParams, journalRows, journalViewDate, journalRowsRemoteSettled, setSearchParams]);
 
   useLayoutEffect(() => {
     const bid = searchParams.get("booking");
@@ -992,8 +1024,16 @@ export function BookingJournalPage() {
       bookingScrollKey.current = "";
       return;
     }
+    if (typeof window !== "undefined") {
+      window.sessionStorage.removeItem(BOOKING_LIST_FLASH_ARMED_KEY);
+    }
     const row = journalRows.find((r) => r.id === bid);
-    if (!row) return;
+    if (!row) {
+      if (isJournalRemoteEnabled() && !journalRowsRemoteSettled) {
+        return;
+      }
+      return;
+    }
     const day = row.startTime.slice(0, 10);
     if (journalViewDate !== day) return;
     const sk = `${bid}@${day}`;
@@ -1031,7 +1071,7 @@ export function BookingJournalPage() {
       window.clearTimeout(tid);
       window.clearTimeout(clearFlashTid);
     };
-  }, [searchParams, journalRows, journalViewDate, setSearchParams]);
+  }, [searchParams, journalRows, journalViewDate, journalRowsRemoteSettled, setSearchParams]);
 
   useEffect(() => {
     if (!flashBookingId || !flashBookingDay) return;
@@ -1380,6 +1420,7 @@ export function BookingJournalPage() {
     setIsNewBookingModalOpen(false);
     setIsRequestBookingFlow(false);
     setRequestBookingComment("");
+    setRequestBookingRequestId("");
     setCurrentStep(1);
     setSkippedSlotStep(false);
     setModalPrefill(null);
@@ -1437,12 +1478,14 @@ export function BookingJournalPage() {
     const client = (searchParams.get("client") ?? "").trim();
     const phone = searchParams.get("phone") ?? "";
     const comment = (searchParams.get("comment") ?? "").trim();
-    const launchKey = `${client}|${phone}`;
+    const requestId = (searchParams.get("requestId") ?? "").trim();
+    const launchKey = `${requestId}|${client}|${phone}`;
     if (!client || requestBookingLaunchKeyRef.current === launchKey) return;
     requestBookingLaunchKeyRef.current = launchKey;
 
     openNewBookingModal(null);
     setIsRequestBookingFlow(true);
+    setRequestBookingRequestId(requestId);
     setStep1ClientMode("new_form");
     setNewClientName(client);
     setNewClientPhoneDigits(national10FromPhoneInput(phone));
@@ -1455,6 +1498,7 @@ export function BookingJournalPage() {
       (prev) => {
         const next = new URLSearchParams(prev);
         next.delete("newBookingFromRequest");
+        next.delete("requestId");
         next.delete("client");
         next.delete("phone");
         next.delete("comment");
@@ -1587,6 +1631,18 @@ export function BookingJournalPage() {
       }
     } else {
       setJournalRows((prev) => [...prev, row]);
+    }
+
+    if (isRequestBookingFlow && requestBookingRequestId) {
+      try {
+        await markRequestAsBooked(requestBookingRequestId);
+        appendUserActionLog({
+          title: "Заявка перенесена в запись",
+          description: `№ ${requestBookingRequestId} · ${clientTitle}`,
+        });
+      } catch (error) {
+        console.warn("Failed to update request status after booking.", error);
+      }
     }
 
     emitArchiveStyleToast({
@@ -1799,38 +1855,70 @@ export function BookingJournalPage() {
   }
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.04em]">
-      <div className="flex h-full w-full p-2">
-        <div className="flex h-full w-full rounded-[16px] bg-black p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button onClick={() => navigate("/profile")} className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+    <div className="h-screen w-screen overflow-hidden tracking-[-0.04em] bg-black max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden">
+      <div className="flex h-full min-h-0 w-full p-2 max-lg:h-auto lg:h-full">
+        <div className="flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] bg-black p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
+          <MarsAppShellSidebar mobileLayout="requests" />
 
-          <main className="relative flex min-h-0 flex-1 flex-col">
-            <header className="mb-2 h-[90px] rounded-[16px] border border-[#DDE1E7] bg-white px-5">
-              <div className="flex h-full items-center gap-3">
-                <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Журнал записей</h1>
-                <div className="ml-6 flex h-full min-h-0 items-center justify-center gap-[20px]">
+          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden">
+            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 lg:px-5 lg:py-5">
+              <div className="flex flex-col gap-4 lg:hidden">
+                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-6 sm:gap-y-2">
+                  <h1 className="shrink-0 text-[28px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Журнал записей</h1>
+                  <div className="flex items-center justify-center gap-[20px] sm:justify-start">
+                    <button
+                      type="button"
+                      aria-label="Предыдущий день"
+                      onClick={() => setJournalViewDate((d) => addCalendarDays(d, -1))}
+                      className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full p-0 text-[28px] font-bold leading-none tracking-[-0.02em] text-black transition-colors hover:bg-black/5"
+                    >
+                      ‹
+                    </button>
+                    <span
+                      className="inline-flex shrink-0 items-center justify-center whitespace-nowrap text-center text-[20px] font-bold leading-none tracking-[-0.04em] text-[#F31624]"
+                      title={formatJournalDayTitleRu(journalViewDate)}
+                    >
+                      {formatJournalDayTitleRu(journalViewDate)}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Следующий день"
+                      onClick={() => setJournalViewDate((d) => addCalendarDays(d, 1))}
+                      className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-full p-0 text-[28px] font-bold leading-none tracking-[-0.02em] text-black transition-colors hover:bg-black/5"
+                    >
+                      ›
+                    </button>
+                  </div>
+                  <span
+                    className="shrink-0 text-center text-[20px] font-bold leading-none tracking-[-0.04em] text-black tabular-nums sm:text-left"
+                    aria-live="polite"
+                    aria-atomic
+                  >
+                    {headerClock}
+                  </span>
+                </div>
+                <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+                  <input
+                    type="search"
+                    value={journalSearchQuery}
+                    onChange={(e) => setJournalSearchQuery(e.target.value)}
+                    className="journal-header-search h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] sm:min-w-[200px] sm:flex-1"
+                    placeholder="Найти заявку..."
+                    aria-label="Найти заявку"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => openNewBookingModal(null)}
+                    className="h-12 min-h-[48px] w-full shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white sm:w-auto"
+                  >
+                    Новая запись
+                  </button>
+                </div>
+              </div>
+
+              <div className="hidden min-w-0 w-full max-w-full items-center gap-3 lg:flex">
+                <h1 className="shrink-0 text-[28px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826] lg:text-[36px]">Журнал записей</h1>
+                <div className="ml-6 flex shrink-0 items-center justify-center gap-[20px]">
                   <button
                     type="button"
                     aria-label="Предыдущий день"
@@ -1861,12 +1949,12 @@ export function BookingJournalPage() {
                 >
                   {headerClock}
                 </span>
-                <div className="ml-auto flex min-w-0 items-center gap-1.5">
+                <div className="ml-auto flex min-w-0 shrink items-center gap-1.5">
                   <input
                     type="search"
                     value={journalSearchQuery}
                     onChange={(e) => setJournalSearchQuery(e.target.value)}
-                    className="journal-header-search h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light]"
+                    className="journal-header-search box-border h-12 w-[320px] max-w-full min-w-[10rem] shrink rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light]"
                     placeholder="Найти заявку..."
                     aria-label="Найти заявку"
                   />
@@ -1881,9 +1969,9 @@ export function BookingJournalPage() {
               </div>
             </header>
 
-            <section className="min-h-0 flex h-full flex-1 gap-4 rounded-[16px] bg-white px-5 py-5">
-        <section className="min-h-0 h-full min-w-0 flex-1">
-        <div className="journal-table-scroll h-full min-w-0 overflow-auto">
+            <section className="relative flex min-h-0 min-w-0 flex-1 flex-col gap-4 rounded-[16px] bg-white px-4 py-4 lg:min-h-0 lg:px-5 lg:py-5 lg:flex-row lg:gap-4">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:min-h-[min(480px,55vh)] lg:h-full lg:min-h-0">
+        <div className="journal-table-scroll h-full min-h-0 min-w-0 flex-1 overflow-auto">
           <div
             className="relative grid min-h-full min-w-[1090px] grid-cols-[72px_1fr] overflow-hidden rounded-[12px] border border-[#ECEEF1]"
             onMouseLeave={() => setHoverLineY(null)}
@@ -2113,8 +2201,8 @@ export function BookingJournalPage() {
         </div>
         </section>
 
-          <section className="w-[310px] shrink-0">
-          <aside className="w-[310px] self-start bg-white">
+          <section className="w-full shrink-0 self-start lg:min-h-0 lg:w-[310px] lg:shrink-0 lg:self-stretch">
+          <aside className="w-full min-h-0 bg-white lg:h-full lg:min-h-0 lg:w-[310px] lg:overflow-y-auto">
             <section className="rounded-[10px] border border-[#ECEEF1] px-5 py-5 font-medium">
               <div>
                 <div className="mb-4 flex items-center justify-between text-[18px] font-semibold">
@@ -2178,7 +2266,7 @@ export function BookingJournalPage() {
           </aside>
           </section>
             </section>
-            <section className="absolute bottom-5 right-5 w-[310px] rounded-[10px] border border-[#ECEEF1] bg-white px-5 py-5 font-medium">
+            <section className="z-[5] mt-4 w-full rounded-[10px] border border-[#ECEEF1] bg-white px-5 py-5 font-medium lg:absolute lg:bottom-5 lg:right-5 lg:mt-0 lg:w-[310px]">
               <h3 className="text-[20px] font-semibold text-black">Статистика за день</h3>
               <div className="mt-3 space-y-2 text-[14px]">
                 <div className="flex justify-between">

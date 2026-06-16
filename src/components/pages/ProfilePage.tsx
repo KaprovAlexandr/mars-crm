@@ -1,7 +1,10 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
-import { useState } from "react";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
+import { AuthStyleExitOverlay } from "@/components/ui/AuthStyleExitOverlay";
+import { ProfilePhotoFace } from "@/components/ui/ProfilePhotoFace";
+import { useEmployeeRole } from "@/lib/auth/AuthRoleContext";
+import { ROLE_LABELS, type EmployeeRole } from "@/lib/auth/employeeRole";
+import { logoutCurrentUser, updateCurrentUserProfilePhoto } from "@/lib/auth/firebaseAuth";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 const managerMetrics = [
@@ -37,7 +40,7 @@ const dailyActivity = [
   { label: "Время первого ответа", value: "4 мин", note: "Среднее время реакции на лид" },
 ];
 
-const publicProfileFields = [
+const PUBLIC_PROFILE_FIELDS_TEMPLATE = [
   { label: "Дата рождения", value: "14.02.1992" },
   { label: "Пол", value: "Мужской" },
   { label: "Гражданство", value: "Российская Федерация" },
@@ -48,6 +51,25 @@ const publicProfileFields = [
   { label: "Статус", value: "В отпуске" },
 ];
 
+function buildPublicFieldsFromAuth(role: EmployeeRole, email: string | null) {
+  const position = ROLE_LABELS[role];
+  const emailStr = email?.trim() ?? "";
+  return PUBLIC_PROFILE_FIELDS_TEMPLATE.map((f) => {
+    if (f.label === "E-mail") return { ...f, value: emailStr || "—" };
+    if (f.label === "Должность") return { ...f, value: position };
+    return { ...f };
+  });
+}
+
+/** Две строки крупного заголовка: всё кроме последнего слова / последнее слово (удобно для ФИО из 3 слов). */
+function splitDisplayNameForHero(displayName: string): [string, string] {
+  const parts = displayName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return ["", ""];
+  if (parts.length === 1) return [parts[0], ""];
+  if (parts.length === 2) return [parts[0], parts[1]];
+  return [parts.slice(0, -1).join(" "), parts[parts.length - 1] ?? ""];
+}
+
 const employeeKpiCards = [
   { title: "Выручка сотрудника", value: "185 000 ₽ за месяц", note: "↑ +12 (+10%) за неделю" },
   { title: "Выработка (нормо-часы)", value: "120 ч / 160 ч", note: "↑ +12 (+10%) за неделю" },
@@ -56,80 +78,149 @@ const employeeKpiCards = [
   { title: "Зарплата (расчёт)", value: "42 500 ₽", note: "↑ +12 (+10%) за неделю" },
   { title: "Доп. продажи (очень важно)", value: "+25 000 ₽", note: "↑ +12 (+10%) за неделю" },
 ];
-const employeeTableRows = [
-  { id: "E-001", fio: "Капров Александр Николаевич", role: "Менеджер", status: "В отпуске", schedule: "5/2, 09:00 - 18:00" },
-  { id: "E-014", fio: "Журавлёв Михаил Дмитриевич", role: "Мастер", status: "На смене", schedule: "2/2, 08:00 - 20:00" },
-  { id: "E-023", fio: "Семёнова Елена Петровна", role: "Администратор", status: "На смене", schedule: "5/2, 10:00 - 19:00" },
-  { id: "E-031", fio: "Кузнецов Евгений Игоревич", role: "Мастер", status: "Выходной", schedule: "2/2, 08:00 - 20:00" },
-];
 
 export function ProfilePage() {
   const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
+  const { role, fullName, firebaseUser, email } = useEmployeeRole();
+  const roleTitle = ROLE_LABELS[role];
+  const displayName = fullName;
+
+  const [heroLine1, heroLine2] = useMemo(() => splitDisplayNameForHero(displayName), [displayName]);
+  const photoUrlFromAuth = firebaseUser?.photoURL?.trim() ?? "";
+  const [localPhotoUrl, setLocalPhotoUrl] = useState<string | null>(null);
+  const displayedPhotoSrc = localPhotoUrl ?? (photoUrlFromAuth || null);
+
   const [isEditingFields, setIsEditingFields] = useState(false);
-  const [publicFields, setPublicFields] = useState(() => publicProfileFields.map((f) => ({ ...f })));
-  const [activeRightTab, setActiveRightTab] = useState<"kpi" | "staff">("kpi");
+  const [publicFields, setPublicFields] = useState(() => buildPublicFieldsFromAuth("manager", null));
+  const [photoError, setPhotoError] = useState("");
+  const [photoBusy, setPhotoBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [exitOverlay, setExitOverlay] = useState(false);
+
+  const finishExitToPromo = useCallback(async () => {
+    navigate("/promo", { replace: true });
+    try {
+      await logoutCurrentUser();
+    } catch {
+      // ignore
+    }
+  }, [navigate]);
+
+  useEffect(() => {
+    setPublicFields(buildPublicFieldsFromAuth(role, email));
+    setIsEditingFields(false);
+    setLocalPhotoUrl(null);
+    setPhotoError("");
+  }, [role, email, fullName]);
+
+  async function handlePhotoFileChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !isEditingFields) return;
+    if (!file.type.startsWith("image/")) {
+      setPhotoError("Выберите файл изображения.");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setPhotoError("Файл слишком большой (макс. 8 МБ).");
+      return;
+    }
+    setPhotoError("");
+    setPhotoBusy(true);
+    try {
+      await updateCurrentUserProfilePhoto(file);
+      setLocalPhotoUrl(null);
+    } catch (err) {
+      console.warn("updateProfile photo failed", err);
+      setPhotoError("Не удалось сохранить фото в аккаунте. Попробуйте файл меньшего размера.");
+    } finally {
+      setPhotoBusy(false);
+    }
+  }
+
+  function handleExitClick() {
+    if (exitOverlay) return;
+    setExitOverlay(true);
+  }
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.04em]">
-      <div className="flex h-full w-full p-2">
-        <div className="flex h-full w-full rounded-[16px] bg-black p-2">
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button className="grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+    <div className="h-screen w-screen overflow-hidden bg-black tracking-[-0.04em] max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden">
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif"
+        className="sr-only"
+        aria-hidden
+        onChange={(e) => void handlePhotoFileChange(e)}
+      />
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
-              <div className="flex items-center gap-3">
-                <div className="flex items-baseline gap-2">
-                  <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Профиль</h1>
-                  <span className="text-[16px] font-bold tracking-[-0.04em] text-[#888888]">(менеджер)</span>
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
+        <div className="flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] bg-black p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
+          <MarsAppShellSidebar mobileLayout="requests" />
+
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
+            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 lg:px-5 lg:py-5">
+              <div className="flex items-center gap-3 max-lg:flex-col max-lg:items-stretch max-lg:gap-2 lg:flex-row lg:items-center">
+                <div className="flex items-baseline gap-2 whitespace-nowrap">
+                  <h1 className="text-[28px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826] lg:text-[36px]">Профиль</h1>
+                  <span className="text-[16px] font-bold tracking-[-0.04em] text-[#888888]">({roleTitle.toLowerCase()})</span>
                 </div>
                 <div className="ml-auto h-12" />
               </div>
             </header>
-            <section className="flex min-h-0 flex-1 gap-2">
-              <section className="relative w-[40%] min-w-[360px] rounded-[16px] border border-[#DDE1E7] bg-white p-6">
+            <section className="flex min-h-0 flex-1 gap-2 max-lg:h-auto max-lg:flex-col lg:h-full">
+              <section className="relative w-[40%] min-w-[360px] rounded-[16px] border border-[#DDE1E7] bg-white p-6 max-lg:w-full max-lg:min-w-0 max-lg:p-4 max-sm:pb-24 md:max-lg:pb-28 lg:p-6">
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <h1 className="max-w-[420px] text-[52px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636]">
-                      <span className="block whitespace-nowrap">Капров Александр</span>
-                      <span className="block">Николаевич</span>
+                    <h1 className="max-w-[420px] text-[38px] font-semibold leading-[0.98] tracking-[-0.03em] text-[#202636] max-sm:text-[30px] lg:text-[52px]">
+                      <span className="block whitespace-nowrap max-sm:whitespace-normal [overflow-wrap:anywhere]">{heroLine1 || displayName}</span>
+                      {heroLine2 ? <span className="block">{heroLine2}</span> : null}
                     </h1>
                   </div>
-                  <img
-                    src="https://i.pravatar.cc/160?img=11"
-                    alt="Фото профиля"
-                    className="h-[72px] w-[72px] rounded-full object-cover"
-                  />
+                  <div className="relative shrink-0">
+                    <button
+                      type="button"
+                      disabled={!isEditingFields || photoBusy}
+                      onClick={() => {
+                        if (isEditingFields && !photoBusy) fileInputRef.current?.click();
+                      }}
+                      className={`relative grid h-[72px] w-[72px] place-items-center overflow-hidden rounded-full border-2 bg-[#F3F3F5] outline-none transition-[box-shadow] ${
+                        isEditingFields
+                          ? "cursor-pointer border-[#EC1C24] shadow-[0_0_0_3px_rgba(236,28,36,0.15)] hover:shadow-[0_0_0_4px_rgba(236,28,36,0.2)]"
+                          : "cursor-default border-transparent"
+                      } disabled:cursor-wait`}
+                      aria-label={isEditingFields ? "Загрузить фото профиля" : "Фото профиля"}
+                    >
+                      <ProfilePhotoFace
+                        photoSrc={displayedPhotoSrc}
+                        alt={displayName ? `Фото: ${displayName}` : "Фото профиля"}
+                        className="h-full w-full object-cover"
+                      />
+                      {isEditingFields ? (
+                        <span className="pointer-events-none absolute inset-x-0 bottom-0 bg-black/55 py-1 text-center text-[10px] font-semibold tracking-[-0.04em] text-white">
+                          Фото
+                        </span>
+                      ) : null}
+                    </button>
+                    {photoBusy ? (
+                      <span className="absolute inset-0 grid place-items-center rounded-full bg-white/60 text-[11px] font-semibold text-[#111826]">
+                        …
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-                <div className="mt-[50px]">
-                  <div className="grid grid-cols-2 gap-x-3 gap-y-4">
+                {photoError ? <p className="mt-2 text-[12px] font-medium text-[#C62828]">{photoError}</p> : null}
+                {isEditingFields ? (
+                  <p className="mt-1 text-[12px] font-medium tracking-[-0.04em] text-[#6F7785]">Нажмите на фото, чтобы загрузить своё изображение.</p>
+                ) : null}
+                <div className="mt-[50px] max-sm:mt-6">
+                  <div className="grid grid-cols-2 gap-x-3 gap-y-4 max-sm:grid-cols-1">
                     {publicFields.map((field, index) => (
                       <div
                         key={field.label}
                         style={{ transitionDelay: `${index * 24}ms`, transitionDuration: "350ms" }}
-                        className={`h-[68px] rounded-[10px] border-2 px-4 py-3 transition-all duration-350 ease-out ${
+                        className={`h-auto min-h-[68px] rounded-[10px] border-2 px-4 py-3 transition-all duration-350 ease-out lg:h-[68px] ${
                           isEditingFields ? "border-[#EC1C24] bg-white" : "border-transparent bg-[#F3F3F5]"
                         }`}
                       >
@@ -146,7 +237,9 @@ export function ProfilePage() {
                             className="mt-1 block w-full bg-transparent text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352] outline-none"
                           />
                         ) : (
-                          <p className="mt-1 text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352]">{field.value}</p>
+                          <p className="mt-1 whitespace-normal break-words text-[16px] font-medium leading-[1.2] tracking-[-0.02em] text-[#3C4352] [overflow-wrap:anywhere]">
+                            {field.value}
+                          </p>
                         )}
                       </div>
                     ))}
@@ -155,17 +248,23 @@ export function ProfilePage() {
                 <button
                   type="button"
                   onClick={() => setIsEditingFields((v) => !v)}
-                  className={`absolute bottom-4 left-4 grid h-12 w-12 cursor-pointer place-items-center rounded-[10px] ${
+                  className={`absolute bottom-4 left-4 grid h-12 w-12 cursor-pointer place-items-center rounded-[10px] max-sm:bottom-6 ${
                     isEditingFields ? "bg-[#EC1C24] text-white" : "bg-[#F3F3F5] text-[#8C909C]"
                   }`}
-                  aria-label="Редактировать поля"
+                  aria-label="Редактировать поля и фото"
                 >
                   <svg viewBox="0 0 24 24" fill="none" className="h-[28px] w-[28px]">
                     <path d="M4 20h4.5L19 9.5 14.5 5 4 15.5V20Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
                     <path d="M12.5 7l4.5 4.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                   </svg>
                 </button>
-                <button className="absolute bottom-4 right-4 grid h-12 w-12 place-items-center rounded-[10px] bg-[#F3F3F5] text-[#8C909C]">
+                <button
+                  type="button"
+                  onClick={handleExitClick}
+                  disabled={exitOverlay}
+                  className="absolute bottom-4 right-4 grid h-12 w-12 cursor-pointer place-items-center rounded-[10px] bg-[#F3F3F5] text-[#8C909C] transition-opacity hover:bg-[#E8EAEF] disabled:cursor-wait disabled:opacity-50 max-sm:bottom-6"
+                  aria-label="Выйти из профиля"
+                >
                   <svg viewBox="0 0 24 24" fill="none" className="h-[28px] w-[28px]">
                     <path d="M10 4.5H6.5C5.4 4.5 4.5 5.4 4.5 6.5V17.5C4.5 18.6 5.4 19.5 6.5 19.5H10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
                     <path d="M14 8.5L18 12L14 15.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -174,87 +273,32 @@ export function ProfilePage() {
                 </button>
               </section>
 
-              <section className="min-w-0 flex-1 rounded-[16px] border border-[#DDE1E7] bg-white p-6">
-                <div className="inline-flex w-fit items-center gap-1 rounded-full p-1">
-                  <button
-                    type="button"
-                    onClick={() => setActiveRightTab("kpi")}
-                    className={`rounded-full px-4 py-2 text-[14px] font-medium tracking-[-0.02em] text-black ${
-                      activeRightTab === "kpi" ? "bg-[#F8F8FA]" : "bg-transparent"
-                    }`}
-                  >
-                    KPI
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveRightTab("staff")}
-                    className={`rounded-full px-4 py-2 text-[14px] font-medium tracking-[-0.02em] text-black ${
-                      activeRightTab === "staff" ? "bg-[#F8F8FA]" : "bg-transparent"
-                    }`}
-                  >
-                    Таблица сотрудников
-                  </button>
-                </div>
-
-                {activeRightTab === "kpi" ? (
-                  <article className="relative mt-[152px]">
-                    <div className="absolute left-0 top-0 -translate-y-full pb-3">
-                      <div className="flex items-center">
-                        <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Моя эффективность</h3>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-2 gap-3">
-                      {employeeKpiCards.map((card) => (
-                        <article key={card.title} className="flex h-[128px] flex-col rounded-[12px] bg-[#F3F3F5] px-4 py-3">
-                          <div>
-                            <p className="text-[16px] font-medium leading-none tracking-[-0.04em] text-[#1D2330]">{card.title}</p>
-                          </div>
-                          <div className="mt-auto">
-                            <p className="text-[32px] font-medium leading-none tracking-[-0.04em] text-[#E00919]">{card.value}</p>
-                            {card.note ? <p className="mt-1 text-[13px] font-medium tracking-[-0.04em] text-[#6F7785]">{card.note}</p> : null}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  </article>
-                ) : (
-                  <article className="relative mt-[152px] min-h-0 flex-1 rounded-[12px] bg-transparent">
-                    <div className="absolute left-0 top-0 -translate-y-full pb-3">
-                      <div className="flex items-center">
-                        <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Таблица сотрудников</h3>
-                      </div>
-                    </div>
-                    <div className="overflow-hidden rounded-[12px] border border-[#EEEDF0]">
-                      <table className="w-full table-fixed border-separate border-spacing-0 text-left text-[14px] tracking-[-0.02em] text-[#111826]">
-                        <thead className="bg-[#F8F8FA] text-[13px] font-semibold text-[#6F7785]">
-                          <tr>
-                            <th className="px-4 py-3">ID</th>
-                            <th className="px-4 py-3">ФИО</th>
-                            <th className="px-4 py-3">Роль</th>
-                            <th className="px-4 py-3">Статус</th>
-                            <th className="px-4 py-3">График</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {employeeTableRows.map((row, index) => (
-                            <tr key={row.id} className={index % 2 === 1 ? "bg-[#F8F8FA]" : "bg-white"}>
-                              <td className="px-4 py-3 font-medium">{row.id}</td>
-                              <td className="px-4 py-3">{row.fio}</td>
-                              <td className="px-4 py-3">{row.role}</td>
-                              <td className="px-4 py-3">{row.status}</td>
-                              <td className="px-4 py-3">{row.schedule}</td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </article>
-                )}
+              <section className="min-w-0 flex-1 rounded-[16px] border border-[#DDE1E7] bg-white p-6 max-lg:w-full max-lg:p-4 lg:p-6">
+                <article className="relative mt-6 max-sm:mt-4">
+                  <div className="mb-4 max-sm:mb-3">
+                    <h3 className="text-[24px] font-semibold tracking-[-0.02em] text-[#111826]">Моя эффективность</h3>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                    {employeeKpiCards.map((card) => (
+                      <article key={card.title} className="flex h-auto min-h-[128px] flex-col rounded-[12px] bg-[#F3F3F5] px-4 py-3">
+                        <div>
+                          <p className="text-[16px] font-medium leading-none tracking-[-0.04em] text-[#1D2330]">{card.title}</p>
+                        </div>
+                        <div className="mt-auto">
+                          <p className="text-[32px] font-medium leading-none tracking-[-0.04em] text-[#E00919]">{card.value}</p>
+                          {card.note ? <p className="mt-1 text-[13px] font-medium tracking-[-0.04em] text-[#6F7785]">{card.note}</p> : null}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </article>
               </section>
             </section>
           </main>
         </div>
       </div>
+
+      <AuthStyleExitOverlay active={exitOverlay} onFinished={finishExitToPromo} />
     </div>
   );
 }

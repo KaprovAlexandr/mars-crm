@@ -1,183 +1,364 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
-import { useNavigate } from "react-router-dom";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
+import {
+  buildOwnerDashboardSnapshot,
+  formatRub,
+  type OwnerChartBucket,
+  type OwnerPeriodMode,
+} from "@/lib/dashboard/ownerDashboardMetrics";
+import { listJournalStorageRows } from "@/lib/data/journalDataSource";
+import { listRequestsStorageRows } from "@/lib/data/requestsDataSource";
+import { listWorkOrdersStorageRows } from "@/lib/data/workOrdersDataSource";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-const ownerKpis = [
-  { label: "Всего записей", value: "486", delta: "↑ +12 (+4%) за неделю" },
-  { label: "Выполнено", value: "372", delta: "↑ +12 (+10%) за неделю" },
-  { label: "Записей/день", value: "16.5", delta: "↑ +1.2 (+1%) за неделю" },
-  { label: "Общий доход", value: "5 842 000 ₽", delta: "↑ +5 600 ₽ (+4%) за неделю" },
-  { label: "Средний чек", value: "15 704 ₽", delta: "↑ +12 (+4%) за неделю" },
-  { label: "Чистая прибыль", value: "1 462 000 ₽", delta: "↑ +12 (+10%) за неделю" },
-  { label: "Рентабельность", value: "25.0%", delta: "↑ +1.2 (+1%) за неделю" },
-  { label: "Конверсия", value: "76.5%", delta: "↑ +5 600 ₽ (+4%) за неделю" },
-];
+const PERIOD_LABELS: Record<OwnerPeriodMode, string> = {
+  month: "Месяц",
+  quarter: "Квартал",
+  year: "Год",
+};
 
-const revenueSeries = [20, 23, 22, 18, 18, 24, 23, 22, 24, 26, 33, 34, 35, 36, 31, 27, 28, 28, 26, 27, 28, 29];
+function OwnerRevenueChart({
+  buckets,
+  maxRevenue,
+  hoveredIndex,
+  setHoveredIndex,
+  selectedIndex,
+  setSelectedIndex,
+}: {
+  buckets: OwnerChartBucket[];
+  maxRevenue: number;
+  hoveredIndex: number | null;
+  setHoveredIndex: (i: number | null) => void;
+  selectedIndex: number;
+  setSelectedIndex: (i: number) => void;
+}) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const n = buckets.length;
+  const marginL = 52;
+  const marginR = 24;
+  const marginT = 28;
+  const marginB = 40;
+  const chartW = 900;
+  const chartH = 210;
+  const innerW = chartW - marginL - marginR;
+  const innerH = chartH - marginT - marginB;
+  const yMax = Math.max(1, maxRevenue * 1.08);
+  const stepX = n <= 1 ? innerW / 2 : innerW / Math.max(1, n - 1);
 
-const workTypeRows = [
-  { label: "Замена масла", value: 120, percent: "30%", color: "#3A8DDE" },
-  { label: "Диагностика", value: 65, percent: "15%", color: "#D2D5DC" },
-  { label: "Замена тормозных колодок", value: 50, percent: "20%", color: "#48BFD2" },
-  { label: "Ремонт подвески", value: 40, percent: "10%", color: "#31A56E" },
-  { label: "Замена аккумулятора", value: 70, percent: "19%", color: "#8D5BCF" },
-  { label: "Проверка давления в шинах", value: 60, percent: "15%", color: "#D19237" },
-];
+  const points = useMemo(() => {
+    return buckets.map((b, idx) => {
+      const x = n <= 1 ? marginL + innerW / 2 : marginL + idx * stepX;
+      const y = marginT + innerH - (b.revenue / yMax) * innerH;
+      return { x, y, b, idx };
+    });
+  }, [buckets, innerH, marginL, marginT, n, stepX, yMax]);
 
-export function DashboardOwnerPage() {
-  const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
+  const polyPoints =
+    n === 1 && points[0]
+      ? `${points[0].x},${points[0].y} ${points[0].x + 0.5},${points[0].y}`
+      : points.map((p) => `${p.x},${p.y}`).join(" ");
+  const areaPoints =
+    n > 0 && points[0]
+      ? n === 1
+        ? `${points[0].x - 20},${marginT + innerH} ${points[0].x},${points[0].y} ${points[0].x + 20},${marginT + innerH}`
+        : `${marginL},${marginT + innerH} ${polyPoints} ${marginL + (n - 1) * stepX},${marginT + innerH}`
+      : "";
+
+  const gridLines = [0, 1, 2, 3, 4].map((i) => {
+    const y = marginT + (i * innerH) / 4;
+    const val = yMax - (i / 4) * yMax;
+    return { y, val };
+  });
+
+  const focusIdx = hoveredIndex ?? selectedIndex;
+  const focus = n > 0 && points.length > 0 ? points[Math.min(Math.max(0, focusIdx), n - 1)] : null;
+
+  function pickIndexFromClientX(clientX: number): number | null {
+    const el = svgRef.current;
+    if (!el || n === 0) return null;
+    const rect = el.getBoundingClientRect();
+    const rx = ((clientX - rect.left) / rect.width) * 980;
+    if (rx < marginL - 12 || rx > marginL + innerW + 12) return null;
+    if (n === 1) return 0;
+    const t = (rx - marginL) / innerW;
+    const idx = Math.round(t * (n - 1));
+    return Math.min(n - 1, Math.max(0, idx));
+  }
+
+  const onMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const idx = pickIndexFromClientX(e.clientX);
+    setHoveredIndex(idx);
+  };
+
+  const onLeave = () => {
+    setHoveredIndex(null);
+  };
+
+  const onClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    const idx = pickIndexFromClientX(e.clientX);
+    if (idx != null) setSelectedIndex(idx);
+  };
+
+  const fmtBucketTitle = (b: OwnerChartBucket) => {
+    const a = b.start;
+    const z = b.end;
+    if (a.toDateString() === z.toDateString()) {
+      return `${a.getDate().toString().padStart(2, "0")}.${(a.getMonth() + 1).toString().padStart(2, "0")}.${a.getFullYear()}`;
+    }
+    return `${a.getDate().toString().padStart(2, "0")}.${(a.getMonth() + 1).toString().padStart(2, "0")} — ${z.getDate().toString().padStart(2, "0")}.${(z.getMonth() + 1).toString().padStart(2, "0")}.${z.getFullYear()}`;
+  };
 
   return (
-    <div className="h-screen w-screen overflow-hidden bg-black">
-      <div className="flex h-full w-full p-2">
-        <div className="flex h-full w-full rounded-[16px] bg-black p-2">
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
+    <svg
+      ref={svgRef}
+      role="img"
+      aria-label="Выручка по заказ-нарядам"
+      viewBox="0 0 980 280"
+      className="h-full min-h-[220px] w-full cursor-crosshair touch-none"
+      onMouseMove={onMove}
+      onMouseLeave={onLeave}
+      onClick={onClick}
+    >
+      <defs>
+        <linearGradient id="ownerAreaDyn" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#E00919" stopOpacity="0.22" />
+          <stop offset="100%" stopColor="#E00919" stopOpacity="0.04" />
+        </linearGradient>
+      </defs>
+      <g>
+        {gridLines.map(({ y, val }) => (
+          <g key={y}>
+            <line x1={marginL} y1={y} x2={marginL + innerW} y2={y} stroke="#ECEDEF" />
+            <text x="8" y={y + 4} className="fill-[#8C93A3] text-[11px]">
+              {val >= 1e6 ? `${(val / 1e6).toFixed(1)}M` : val >= 1000 ? `${Math.round(val / 1000)}k` : Math.round(val)}
+            </text>
+          </g>
+        ))}
+      </g>
+
+      {n > 0 && areaPoints ? (
+        <>
+          {focus ? (
+            <>
+              <rect
+                x={focus.x - 18}
+                y={marginT}
+                width="36"
+                height={innerH}
+                fill="#E00919"
+                opacity={hoveredIndex != null ? 0.12 : 0.06}
+              />
+              <polygon points={areaPoints} fill="url(#ownerAreaDyn)" />
+              <polyline points={polyPoints} fill="none" stroke="#E00919" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+              <circle cx={focus.x} cy={focus.y} r="5" fill="#E00919" stroke="white" strokeWidth="2" />
+              <line x1={focus.x} y1={focus.y + 6} x2={focus.x} y2={marginT + innerH} stroke="#E00919" strokeDasharray="4 4" />
+              <rect x={focus.x - 92} y={focus.y - 62} width="184" height="52" rx="8" fill="#2E2E33" />
+              <text x={focus.x - 82} y={focus.y - 41} className="fill-white text-[11px]">
+                {fmtBucketTitle(focus.b)}
+              </text>
+              <text x={focus.x - 82} y={focus.y - 22} className="fill-white text-[12px] font-semibold">
+                {formatRub(focus.b.revenue)}
+              </text>
+            </>
+          ) : null}
+        </>
+      ) : (
+        <text x={400} y={150} className="fill-[#8C93A3] text-[14px]">
+          Нет данных для графика
+        </text>
+      )}
+
+      <g className="fill-[#8C93A3] text-[11px]">
+        {points.map((p) => (
+          <text key={p.idx} x={p.x} y={marginT + innerH + 28} textAnchor="middle">
+            {p.b.label}
+          </text>
+        ))}
+      </g>
+    </svg>
+  );
+}
+
+function ServiceDonut({ slices, centerTotal, centerLabel }: { slices: { label: string; count: number; percent: string; color: string }[]; centerTotal: number; centerLabel: string }) {
+  const r = 46;
+  const c = 2 * Math.PI * r;
+  const total = slices.reduce((a, x) => a + x.count, 0) || 1;
+  let offset = 0;
+  const arcs = slices.map((s) => {
+    const rawLen = (s.count / total) * c;
+    const len = Math.min(c - 0.02, rawLen);
+    const dash = `${len} ${c - len}`;
+    const o = offset;
+    offset -= len;
+    return { ...s, dash, offset: o };
+  });
+
+  return (
+    <div className="relative h-[210px] w-[210px]">
+      <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90">
+        <circle cx="60" cy="60" r={r} fill="none" stroke="#EEF0F4" strokeWidth="6" />
+        {arcs.map((a) => (
+          <circle
+            key={a.label}
+            cx="60"
+            cy="60"
+            r={r}
+            fill="none"
+            stroke={a.color}
+            strokeWidth="6"
+            strokeLinecap="round"
+            strokeDasharray={a.dash}
+            strokeDashoffset={a.offset}
+          />
+        ))}
+      </svg>
+      <div className="pointer-events-none absolute inset-0 grid place-items-center text-center">
+        <div>
+          <p className="text-[34px] font-semibold leading-none text-[#222]">{centerTotal.toLocaleString("ru-RU")}</p>
+          <p className="mt-1 text-[11px] text-[#9A9EA8]">{centerLabel}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function DashboardOwnerPage() {
+  const [period, setPeriod] = useState<OwnerPeriodMode>("month");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [workOrders, setWorkOrders] = useState<Awaited<ReturnType<typeof listWorkOrdersStorageRows>>>([]);
+  const [journal, setJournal] = useState<Awaited<ReturnType<typeof listJournalStorageRows>>>([]);
+  const [requests, setRequests] = useState<Awaited<ReturnType<typeof listRequestsStorageRows>>>([]);
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    void (async () => {
+      try {
+        const [wo, jn, rq] = await Promise.all([listWorkOrdersStorageRows(), listJournalStorageRows(), listRequestsStorageRows()]);
+        if (!cancelled) {
+          setWorkOrders(wo);
+          setJournal(jn);
+          setRequests(rq);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : "Не удалось загрузить данные");
+          setWorkOrders([]);
+          setJournal([]);
+          setRequests([]);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const now = useMemo(() => new Date(), []);
+
+  const snapshot = useMemo(
+    () => buildOwnerDashboardSnapshot(period, now, workOrders, journal, requests),
+    [period, now, workOrders, journal, requests],
+  );
+
+  useEffect(() => {
+    const last = snapshot.buckets.length - 1;
+    setSelectedIndex(last >= 0 ? last : 0);
+    setHoveredIndex(null);
+  }, [period, snapshot.buckets.length]);
+
+  const serviceSlices = snapshot.serviceSlices.length
+    ? snapshot.serviceSlices
+    : [{ label: "Нет записей", count: 1, percent: "100%", color: "#D2D5DC" }];
+
+  return (
+    <div className="h-screen w-screen overflow-hidden bg-black max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden">
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
+        <div className="flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] bg-black p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)]">
+          <MarsAppShellSidebar mobileLayout="requests" />
+
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
+            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 lg:px-5 lg:py-5">
+              <div className="flex items-center max-lg:flex-col max-lg:items-stretch max-lg:gap-3 lg:flex-row">
+                <h1 className="text-[28px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826] lg:text-[36px]">Дашборд руководителя</h1>
                 <button
                   type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
+                  className="ml-auto h-12 rounded-[10px] bg-[#E00919] px-4 text-[16px] font-medium tracking-[-0.04em] text-white max-lg:ml-0 max-lg:w-full sm:max-lg:w-auto"
                 >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button onClick={() => navigate("/profile")} className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
-
-          <main className="flex min-h-0 flex-1 flex-col">
-            <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
-              <div className="flex items-center">
-                <h1 className="text-[36px] font-bold leading-[100%] tracking-[-0.04em] text-[#111826]">Дашборд руководителя</h1>
-                <button className="ml-auto h-12 rounded-[10px] bg-[#E00919] px-4 text-[16px] font-medium tracking-[-0.04em] text-white">
                   Сформировать отчет
                 </button>
               </div>
             </header>
 
-            <section className="flex min-h-0 flex-1 flex-col gap-4 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">
+            <section className="flex min-h-0 flex-1 flex-col gap-4 rounded-[16px] border border-[#DDE1E7] bg-white px-4 py-4 lg:px-5 lg:py-5">
+              {error ? (
+                <p className="rounded-[10px] border border-[#F5C6C6] bg-[#FFF5F5] px-4 py-3 text-[14px] text-[#B71C1C]">{error}</p>
+              ) : null}
+              {loading ? (
+                <p className="text-[15px] text-[#6F7785]">Загрузка показателей…</p>
+              ) : null}
+
               <div className="rounded-[10px] bg-[#F3F3F5] px-4 py-4">
-                <div className="grid grid-cols-4 gap-3">
-                {ownerKpis.map((kpi) => (
-                  <article key={kpi.label} className="rounded-[12px] bg-white px-4 py-3">
-                    <p className="text-[20px] font-medium tracking-[-0.04em] text-[#171717]">{kpi.label}</p>
-                    <p className="mt-3 text-[52px] font-medium leading-none tracking-[-0.04em] text-[#E00919]">{kpi.value}</p>
-                    <p className="mt-2 text-[14px] font-medium text-[#8D8D95]">{kpi.delta}</p>
-                  </article>
-                ))}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  {snapshot.kpis.map((kpi) => (
+                    <article key={kpi.label} className="rounded-[12px] bg-white px-4 py-3">
+                      <p className="text-[20px] font-medium tracking-[-0.04em] text-[#171717]">{kpi.label}</p>
+                      <p className="mt-3 text-[38px] font-medium leading-none tracking-[-0.04em] text-[#E00919] lg:text-[52px]">{kpi.value}</p>
+                      <p className="mt-2 text-[14px] font-medium text-[#8D8D95]">{kpi.delta}</p>
+                    </article>
+                  ))}
                 </div>
               </div>
 
-              <div className="grid min-h-0 flex-1 grid-cols-[50%_50%] gap-3 overflow-hidden">
+              <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 overflow-hidden xl:grid-cols-[50%_50%]">
                 <article className="flex min-h-0 flex-col rounded-[10px] bg-[#F3F3F5] px-4 py-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h2 className="text-[20px] font-semibold text-[#111]">График</h2>
-                    <div className="flex items-center gap-2">
-                      <button className="rounded-[8px] bg-[#d51a21] px-3 py-1 text-[12px] font-medium text-white">Месяц</button>
-                      <button className="rounded-[8px] bg-white px-3 py-1 text-[12px] font-medium text-[#444]">Квартал</button>
-                      <button className="rounded-[8px] bg-white px-3 py-1 text-[12px] font-medium text-[#444]">Год</button>
+                  <div className="mb-3 flex items-center justify-between max-sm:flex-col max-sm:items-stretch max-sm:gap-2">
+                    <h2 className="text-[20px] font-semibold text-[#111]">Выручка по ЗН</h2>
+                    <div className="flex items-center gap-2 max-sm:justify-end">
+                      {(["month", "quarter", "year"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          onClick={() => setPeriod(m)}
+                          className={`rounded-[8px] px-3 py-1 text-[12px] font-medium transition-colors ${
+                            period === m ? "bg-[#d51a21] text-white" : "bg-white text-[#444] hover:bg-[#ECEEF2]"
+                          }`}
+                        >
+                          {PERIOD_LABELS[m]}
+                        </button>
+                      ))}
                     </div>
                   </div>
-                  <div className="min-h-0 flex-1 rounded-[10px] bg-white p-3">
-                    <svg viewBox="0 0 980 280" className="h-full w-full">
-                      <defs>
-                        <linearGradient id="ownerArea" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor="#E00919" stopOpacity="0.22" />
-                          <stop offset="100%" stopColor="#E00919" stopOpacity="0.04" />
-                        </linearGradient>
-                      </defs>
-                      <g>
-                        {[0, 1, 2, 3, 4].map((i) => (
-                          <line key={i} x1="40" y1={30 + i * 50} x2="940" y2={30 + i * 50} stroke="#ECEDEF" />
-                        ))}
-                        <text x="10" y="235" className="fill-[#8C93A3] text-[11px]">5</text>
-                        <text x="10" y="185" className="fill-[#8C93A3] text-[11px]">15</text>
-                        <text x="10" y="135" className="fill-[#8C93A3] text-[11px]">25</text>
-                        <text x="10" y="85" className="fill-[#8C93A3] text-[11px]">35</text>
-                        <text x="10" y="35" className="fill-[#8C93A3] text-[11px]">45</text>
-                      </g>
-
-                      {(() => {
-                        const stepX = 900 / (revenueSeries.length - 1);
-                        const points = revenueSeries
-                          .map((v, idx) => {
-                            const x = 40 + idx * stepX;
-                            const y = 240 - ((v - 5) / 40) * 210;
-                            return `${x},${y}`;
-                          })
-                          .join(" ");
-                        const area = `40,240 ${points} 940,240`;
-                        const focusIndex = 14;
-                        const fx = 40 + focusIndex * stepX;
-                        const fy = 240 - ((revenueSeries[focusIndex] - 5) / 40) * 210;
-                        return (
-                          <>
-                            <rect x={fx - 34} y="25" width="68" height="215" fill="#E00919" opacity="0.06" />
-                            <polygon points={area} fill="url(#ownerArea)" />
-                            <polyline points={points} fill="none" stroke="#E00919" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
-                            <circle cx={fx} cy={fy} r="4.5" fill="#E00919" />
-                            <line x1={fx} y1={fy + 7} x2={fx} y2={212} stroke="#E00919" strokeDasharray="4 4" />
-                            <rect x={fx - 84} y={fy - 64} width="130" height="52" rx="8" fill="#2E2E33" />
-                            <text x={fx - 74} y={fy - 43} className="fill-white text-[11px]">05 августа, 2025</text>
-                            <text x={fx - 74} y={fy - 24} className="fill-white text-[11px]">31 100 ₽</text>
-                          </>
-                        );
-                      })()}
-
-                      <g className="fill-[#8C93A3] text-[11px]">
-                        <text x="90" y="265">03.08</text>
-                        <text x="230" y="265">04.08</text>
-                        <text x="370" y="265">05.08</text>
-                        <text x="510" y="265">06.08</text>
-                        <text x="650" y="265">07.08</text>
-                        <text x="790" y="265">08.08</text>
-                        <text x="900" y="265">09.08</text>
-                      </g>
-                    </svg>
+                  <div className="min-h-0 flex-1 overflow-x-auto rounded-[10px] bg-white p-3">
+                    <OwnerRevenueChart
+                      buckets={snapshot.buckets}
+                      maxRevenue={snapshot.maxChartRevenue}
+                      hoveredIndex={hoveredIndex}
+                      setHoveredIndex={setHoveredIndex}
+                      selectedIndex={selectedIndex}
+                      setSelectedIndex={setSelectedIndex}
+                    />
                   </div>
                 </article>
 
                 <article className="min-h-0 rounded-[10px] bg-[#F3F3F5] px-4 py-4">
-                  <h2 className="mb-3 text-[20px] font-semibold text-[#111]">Типы работ</h2>
-                  <div className="flex h-[calc(100%-44px)] min-h-0 rounded-[10px] bg-white p-4">
-                    <div className="flex w-[46%] min-w-[260px] items-center justify-center">
-                      <div className="relative h-[210px] w-[210px]">
-                        <svg viewBox="0 0 120 120" className="h-full w-full -rotate-90">
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#EEF0F4" strokeWidth="6" />
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#3A8DDE" strokeWidth="6" strokeLinecap="round" strokeDasharray="95 289" strokeDashoffset="0" />
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#D2D5DC" strokeWidth="6" strokeLinecap="round" strokeDasharray="38 289" strokeDashoffset="-101" />
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#48BFD2" strokeWidth="6" strokeLinecap="round" strokeDasharray="57 289" strokeDashoffset="-145" />
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#31A56E" strokeWidth="6" strokeLinecap="round" strokeDasharray="31 289" strokeDashoffset="-208" />
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#8D5BCF" strokeWidth="6" strokeLinecap="round" strokeDasharray="54 289" strokeDashoffset="-245" />
-                          <circle cx="60" cy="60" r="46" fill="none" stroke="#D19237" strokeWidth="6" strokeLinecap="round" strokeDasharray="44 289" strokeDashoffset="-305" />
-                        </svg>
-                        <div className="absolute inset-0 grid place-items-center text-center">
-                          <div>
-                            <p className="text-[34px] font-semibold leading-none text-[#222]">427</p>
-                            <p className="mt-1 text-[11px] text-[#9A9EA8]">Всего заявок</p>
-                          </div>
-                        </div>
-                      </div>
+                  <h2 className="mb-3 text-[20px] font-semibold text-[#111]">Типы работ (журнал)</h2>
+                  <div className="flex h-[calc(100%-44px)] min-h-0 rounded-[10px] bg-white p-4 max-sm:flex-col max-sm:gap-3">
+                    <div className="flex w-[46%] min-w-[260px] items-center justify-center max-sm:w-full max-sm:min-w-0">
+                      <ServiceDonut slices={serviceSlices} centerTotal={snapshot.requestsTotal} centerLabel="Всего заявок" />
                     </div>
-                    <div className="min-w-0 flex-1 pt-3">
+                    <div className="min-w-0 flex-1 pt-3 max-sm:w-full xl:flex xl:items-center xl:pt-0">
                       <div className="space-y-3">
-                        {workTypeRows.map((row) => (
+                        {serviceSlices.map((row) => (
                           <div key={row.label} className="grid grid-cols-[10px_1fr_auto_auto] items-center gap-2">
                             <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: row.color }} />
                             <span className="truncate text-[12px] text-[#4A4F59]">{row.label}</span>
-                            <span className="text-[12px] text-[#8E949F]">{row.value}</span>
+                            <span className="text-[12px] text-[#8E949F]">{row.count}</span>
                             <span className="text-[12px] text-[#8E949F]">{row.percent}</span>
                           </div>
                         ))}

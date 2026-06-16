@@ -1,6 +1,4 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { useEffect, useMemo, useRef, useState, type TransitionEvent } from "react";
 import { createPortal } from "react-dom";
@@ -13,6 +11,8 @@ import {
   listClientsStorageRows,
   type ClientStorageRow,
 } from "@/lib/data/clientsDataSource";
+import { computeClientOrdersMetrics, formatRubAmount, type WorkOrderMetricsRow } from "@/lib/clients/clientOrdersMetrics";
+import { fetchWorkOrdersForMetrics, getWorkOrdersForMetrics } from "@/lib/work-orders/workOrdersForMetrics";
 
 type ClientTableRow = {
   id: string;
@@ -52,7 +52,7 @@ const REVENUE_BRACKET_LABELS: Record<RevenueBracket, string> = {
 };
 type SortKey = "id" | "fullName" | "phone" | "requestsCount" | "lastVisit" | "totalAmount";
 type SortDir = "asc" | "desc";
-type ClientActionId = "open" | "call" | "notify" | "createBooking" | "createWorkOrder";
+type ClientActionId = "open" | "call" | "createBooking" | "createWorkOrder";
 type ClientType = "person" | "company" | "entrepreneur" | "";
 
 type CreateClientDraft = {
@@ -241,7 +241,6 @@ function toTelHref(phone: string): string {
 function ClientActionIcon({ type, className }: { type: ClientActionId; className?: string }) {
   if (type === "open") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M9 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /><path d="M14 4h6v6M20 4l-9 9" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>;
   if (type === "call") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M7.2 5.5C7.5 5 8 4.8 8.6 4.9L10.9 5.3C11.5 5.4 11.9 5.8 12 6.4L12.4 8.5C12.5 9 12.3 9.5 11.9 9.9L10.8 11C11.5 12.3 12.6 13.4 13.9 14.2L15 13.1C15.4 12.7 15.9 12.5 16.4 12.6L18.5 13C19.1 13.1 19.5 13.5 19.6 14.1L20 16.4C20.1 17 19.9 17.5 19.4 17.8L17.8 18.9C17.2 19.3 16.5 19.4 15.8 19.2C13.4 18.5 11.2 17.2 9.4 15.4C7.6 13.6 6.3 11.4 5.6 9C5.4 8.3 5.5 7.6 5.9 7L7.2 5.5Z" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /></svg>;
-  if (type === "notify") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M18 9a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" /><path d="M13.7 21a2 2 0 01-3.4 0" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /></svg>;
   if (type === "createBooking") return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><rect x="4" y="5" width="16" height="15" rx="2" stroke="currentColor" strokeWidth="1.9" /><path d="M8 3v4M16 3v4M4 10h16M12 13v4M10 15h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /></svg>;
   return <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden><path d="M5 7h14M5 12h14M5 17h8" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /><path d="M17 16l3 3m0-3l-3 3" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" /></svg>;
 }
@@ -283,7 +282,6 @@ function mapClientStorageToUi(row: ClientStorageRow): ClientTableRow {
 
 export function ClientsPage() {
   const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
   const filterBarRef = useRef<HTMLDivElement>(null);
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   const [openFilter, setOpenFilter] = useState<ClientsFilterId | null>(null);
@@ -303,6 +301,33 @@ export function ClientsPage() {
   const [createClientModalMounted, setCreateClientModalMounted] = useState(false);
   const [createClientModalActive, setCreateClientModalActive] = useState(false);
   const [createClientDraft, setCreateClientDraft] = useState<CreateClientDraft>(EMPTY_CREATE_CLIENT_DRAFT);
+  const [workOrdersForMetrics, setWorkOrdersForMetrics] = useState<WorkOrderMetricsRow[]>(() => getWorkOrdersForMetrics());
+
+  useEffect(() => {
+    async function refreshWorkOrdersForMetrics() {
+      try {
+        setWorkOrdersForMetrics(await fetchWorkOrdersForMetrics());
+      } catch {
+        setWorkOrdersForMetrics(getWorkOrdersForMetrics());
+      }
+    }
+    void refreshWorkOrdersForMetrics();
+    window.addEventListener("focus", refreshWorkOrdersForMetrics);
+    return () => window.removeEventListener("focus", refreshWorkOrdersForMetrics);
+  }, []);
+
+  const tableRows = useMemo(
+    () =>
+      rows.map((row) => {
+        const metrics = computeClientOrdersMetrics(row.fullName, workOrdersForMetrics);
+        return {
+          ...row,
+          requestsCount: metrics.totalOrders,
+          totalAmount: formatRubAmount(metrics.totalAmount),
+        };
+      }),
+    [rows, workOrdersForMetrics],
+  );
 
   useEffect(() => {
     if (!isClientsRemoteEnabled()) return;
@@ -338,7 +363,7 @@ export function ClientsPage() {
     const qDigits = searchQuery.replace(/\D/g, "");
     const now = new Date();
 
-    return rows.filter((row) => {
+    return tableRows.filter((row) => {
       if (qText) {
         const byName = row.fullName.toLowerCase().includes(qText);
         const byId = row.id.toLowerCase().includes(qText);
@@ -349,13 +374,7 @@ export function ClientsPage() {
       if (!rowMatchesOrdersBrackets(row, ordersBrackets)) return false;
       if (!rowMatchesRevenueBrackets(row, revenueBrackets)) return false;
 
-      if (newClientsOnly) {
-        const rd = parseRuDate(row.lastVisit);
-        if (!rd) return false;
-        const rd0 = startOfDay(rd);
-        const since = startOfDay(addDays(now, -13));
-        if (rd0 < since || rd0 > endOfDay(now)) return false;
-      }
+      if (newClientsOnly && row.requestsCount > 1) return false;
       if (notVisited3mQuick) {
         const rd = parseRuDate(row.lastVisit);
         if (!rd) return false;
@@ -366,7 +385,7 @@ export function ClientsPage() {
       return true;
     });
   }, [
-    rows,
+    tableRows,
     searchQuery,
     visitPresets,
     ordersBrackets,
@@ -426,18 +445,17 @@ export function ClientsPage() {
     let newC = 0;
     let absent3m = 0;
     let topR = 0;
-    for (const row of rows) {
+    for (const row of tableRows) {
+      if (row.requestsCount <= 1) newC += 1;
       const rd = parseRuDate(row.lastVisit);
       if (rd) {
         const rd0 = startOfDay(rd);
-        const since = startOfDay(addDays(now, -13));
-        if (rd0 >= since && rd0 <= endOfDay(now)) newC += 1;
         if (rd0 < startOfDay(addDays(now, -90))) absent3m += 1;
       }
       if (parseAmountRub(row.totalAmount) >= 30_000) topR += 1;
     }
     return { newC, absent3m, topR };
-  }, [rows]);
+  }, [tableRows]);
 
   const noActiveFilters =
     !searchQuery.trim() &&
@@ -486,11 +504,6 @@ export function ClientsPage() {
       setClientActionsModal(null);
       return;
     }
-    if (actionId === "notify") {
-      emitArchiveStyleToast({ line1: row.fullName, line2: "уведомление отправлено" });
-      setClientActionsModal(null);
-      return;
-    }
     if (actionId === "createBooking") {
       setClientActionsModal(null);
       navigate(
@@ -535,6 +548,19 @@ export function ClientsPage() {
       totalAmount: "0 ₽",
     };
 
+    const overviewBootstrap = {
+      id: nextRow.id,
+      fullName: nextRow.fullName,
+      phone: nextRow.phone,
+      lastVisit: nextRow.lastVisit,
+      totalAmount: nextRow.totalAmount,
+      email: createClientDraft.email.trim(),
+      inn: createClientDraft.inn.trim(),
+      clientType: createClientDraft.clientType,
+      car: createClientDraft.car.trim(),
+      plate: createClientDraft.plate.trim(),
+    };
+
     if (isClientsRemoteEnabled()) {
       try {
         const payload: ClientStorageRow = {
@@ -544,9 +570,22 @@ export function ClientsPage() {
           requests_count: nextRow.requestsCount,
           last_visit: nextRow.lastVisit,
           total_amount: nextRow.totalAmount,
+          email: overviewBootstrap.email || "",
+          client_type: createClientDraft.clientType || "",
+          inn: overviewBootstrap.inn || "",
+          car: overviewBootstrap.car || "",
+          plate: overviewBootstrap.plate || "",
         };
         const created = await insertClientStorageRow(payload);
         setRows((prev) => [mapClientStorageToUi(created), ...prev]);
+        try {
+          window.sessionStorage.setItem(
+            `marsClientOverviewBootstrap:${created.id}`,
+            JSON.stringify({ ...overviewBootstrap, id: created.id }),
+          );
+        } catch {
+          // ignore
+        }
       } catch (error) {
         console.warn("Failed to create client via API.", error);
         emitArchiveStyleToast({ line1: "Ошибка синхронизации", line2: "Не удалось добавить клиента" });
@@ -554,6 +593,11 @@ export function ClientsPage() {
       }
     } else {
       setRows((prev) => [nextRow, ...prev]);
+      try {
+        window.sessionStorage.setItem(`marsClientOverviewBootstrap:${nextId}`, JSON.stringify(overviewBootstrap));
+      } catch {
+        // ignore quota / private mode
+      }
     }
     closeCreateClientModal();
     emitArchiveStyleToast({ line1: "Клиент добавлен", line2: fullName });
@@ -627,46 +671,28 @@ export function ClientsPage() {
   }`;
 
   return (
-    <div className={`h-screen w-screen overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
-      <div className="flex h-full w-full p-2">
-        <div className={`flex h-full w-full rounded-[16px] p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button type="button" className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button type="button" onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button type="button" onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button type="button" onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
-            <button type="button" onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button type="button" className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button type="button" className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button type="button" onClick={() => navigate("/profile")} className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+    <div
+      className={`h-screen w-screen overflow-hidden max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
+    >
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
+        <div
+          className={`flex h-full min-h-0 w-full max-lg:h-auto max-lg:flex-col rounded-[16px] p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
+        >
+          <MarsAppShellSidebar mobileLayout="requests" />
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            <header className={`mb-2 rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}>
-              <div className="flex items-center gap-3">
-                <div className="flex items-baseline gap-2">
-                  <h1 className={`text-[36px] font-bold leading-[100%] tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>База клиентов</h1>
-                  <span className={`text-[16px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#888888]"}`}>({totalClients})</span>
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
+            <header className={`mb-2 rounded-[16px] border px-4 py-4 lg:px-5 lg:py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}>
+              <div className="flex max-lg:flex-col max-lg:items-stretch max-lg:gap-4 items-center gap-3 lg:flex-row lg:items-center lg:gap-3">
+                <div className="flex min-w-0 items-baseline gap-2 whitespace-nowrap">
+                  <h1 className={`text-[28px] font-bold leading-[100%] tracking-[-0.04em] max-lg:shrink-0 max-sm:text-[24px] lg:text-[32px] xl:text-[36px] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>База клиентов</h1>
+                  <span className={`text-[16px] font-bold tracking-[-0.04em] shrink-0 ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#888888]"}`}>({totalClients})</span>
                 </div>
-                <div className="ml-auto flex items-center gap-1.5">
-                  <div className="relative">
+                <div className="ml-auto flex w-full min-w-0 max-lg:ml-0 max-lg:flex-col max-lg:gap-2 sm:max-lg:flex-row sm:max-lg:flex-wrap items-stretch sm:max-lg:items-center lg:ml-auto lg:w-auto lg:flex-row lg:items-center lg:gap-1 xl:gap-1.5">
+                  <div className="relative w-full min-w-0 sm:max-lg:min-w-[200px] sm:max-lg:flex-1 lg:w-auto lg:flex-none">
                     <input
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      className="h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden lg:w-[280px] xl:w-[320px]"
                       placeholder="Поиск по ФИО..."
                       aria-label="Поиск по ФИО..."
                     />
@@ -686,14 +712,14 @@ export function ClientsPage() {
                   <button
                     type="button"
                     onClick={openCreateClientModal}
-                    className="h-12 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                   >
                     Добавить клиента
                   </button>
                   <button
                     type="button"
-                    onClick={() => exportClientsToXlsx(noActiveFilters ? rows : sortedRows)}
-                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white"
+                    onClick={() => exportClientsToXlsx(noActiveFilters ? tableRows : sortedRows)}
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none lg:px-3 lg:text-[16px] xl:px-4 xl:text-[18px]"
                   >
                     Экспорт в Excel
                   </button>
@@ -701,7 +727,9 @@ export function ClientsPage() {
               </div>
             </header>
 
-            <section className={`flex min-h-0 flex-1 flex-col gap-5 rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}>
+            <section
+              className={`flex min-h-0 flex-1 flex-col gap-4 rounded-[16px] border px-4 py-4 max-lg:gap-4 lg:gap-5 lg:px-5 lg:py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
+            >
               <div className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-3">
                 <div ref={filterBarRef} className="flex min-w-0 flex-wrap items-center gap-[10px] gap-y-3">
                   {FILTER_KEYS.map(({ id, label }) => (
@@ -817,15 +845,17 @@ export function ClientsPage() {
                 <button
                   type="button"
                   onClick={resetFilters}
-                  className="inline-flex shrink-0 cursor-pointer items-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border"
+                  className="inline-flex w-full shrink-0 cursor-pointer items-center justify-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border sm:w-auto sm:justify-start lg:w-auto"
                 >
                   Сбросить фильтры
                 </button>
               </div>
 
-              <div className={`min-h-0 flex-1 overflow-hidden rounded-lg ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
-                <div className="h-full overflow-x-hidden overflow-y-hidden">
-                  <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
+              <div
+                className={`@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg max-lg:min-h-[240px] max-lg:flex-none lg:flex-1 ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}
+              >
+                <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+                  <table className="w-full min-w-[1200px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
                     <colgroup>
                       <col className="w-[10%]" />
                       <col className="w-[20%]" />
@@ -835,41 +865,43 @@ export function ClientsPage() {
                       <col className="w-[14%]" />
                       <col className="w-[4%]" />
                     </colgroup>
-                    <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
+                    <thead
+                      className={`text-left text-[15px] font-medium leading-tight tracking-[-0.015em] whitespace-normal @[1280px]:text-[16px] @[1280px]:tracking-[-0.04em] @[1280px]:whitespace-nowrap ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}
+                    >
                       <tr>
-                        <th className="rounded-l-[5px] pl-8 pr-4 py-2.5 align-middle font-medium">
+                        <th className="rounded-l-[5px] pl-4 pr-3 py-3 align-middle font-medium @[1280px]:pl-8 @[1280px]:pr-4 @[1280px]:py-2.5">
                           <span className="inline-flex items-center gap-2 font-medium">
                             ID
-                            <button type="button" onClick={() => toggleSort("id")} className="cursor-pointer">
+                            <button type="button" onClick={() => toggleSort("id")} className="cursor-pointer shrink-0">
                               <SortIcon />
                             </button>
                           </span>
                         </th>
-                        <th className="px-4 py-2.5 align-middle font-medium">
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
                           <span className="inline-flex items-center gap-2 font-medium">
                             ФИО
-                            <button type="button" onClick={() => toggleSort("fullName")} className="cursor-pointer">
+                            <button type="button" onClick={() => toggleSort("fullName")} className="cursor-pointer shrink-0">
                               <SortIcon />
                             </button>
                           </span>
                         </th>
-                        <th className="px-4 py-2.5 align-middle font-medium">
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
                           <span className="inline-flex items-center gap-2 font-medium">
                             Телефон
-                            <button type="button" onClick={() => toggleSort("phone")} className="cursor-pointer">
+                            <button type="button" onClick={() => toggleSort("phone")} className="cursor-pointer shrink-0">
                               <SortIcon />
                             </button>
                           </span>
                         </th>
-                        <th className="px-4 py-2.5 align-middle font-medium">
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
                           <span className="inline-flex items-center gap-2 font-medium">
                             Последний визит
-                            <button type="button" onClick={() => toggleSort("lastVisit")} className="cursor-pointer">
+                            <button type="button" onClick={() => toggleSort("lastVisit")} className="cursor-pointer shrink-0">
                               <SortIcon />
                             </button>
                           </span>
                         </th>
-                        <th className="min-w-0 px-4 py-2.5 align-middle font-medium">
+                        <th className="min-w-0 px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
                           <span className="inline-flex max-w-full flex-wrap items-center gap-2 font-medium">
                             <span className="min-w-0 leading-tight">Заказ-наряды</span>
                             <button type="button" onClick={() => toggleSort("requestsCount")} className="cursor-pointer shrink-0">
@@ -877,15 +909,15 @@ export function ClientsPage() {
                             </button>
                           </span>
                         </th>
-                        <th className="px-4 py-2.5 align-middle font-medium">
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
                           <span className="inline-flex items-center gap-2 font-medium">
                             Общая выручка
-                            <button type="button" onClick={() => toggleSort("totalAmount")} className="cursor-pointer">
+                            <button type="button" onClick={() => toggleSort("totalAmount")} className="cursor-pointer shrink-0">
                               <SortIcon />
                             </button>
                           </span>
                         </th>
-                        <th className="rounded-r-[5px] px-4 py-2.5 align-middle font-medium text-center">⋮</th>
+                        <th className="rounded-r-[5px] px-3 py-3 text-center align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">⋮</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -896,24 +928,40 @@ export function ClientsPage() {
                         return (
                           <tr
                             key={row.id}
-                            className={`cursor-pointer border-[5px] transition ${borderCls} ${bgCls} ${hoverCls}`}
+                            className={`cursor-pointer border-[5px] transition [&_td]:align-middle ${borderCls} ${bgCls} ${hoverCls}`}
                             onClick={() => navigate(`/clients/${row.id}`)}
                           >
                             <td
-                              className={`whitespace-nowrap pl-8 pr-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
+                              className={`pl-4 pr-3 py-3 text-[15px] leading-snug tracking-[-4%] tabular-nums @[1280px]:pl-8 @[1280px]:pr-4 @[1280px]:py-3 @[1280px]:text-[16px] @[1280px]:leading-normal @[1280px]:whitespace-nowrap ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
                             >
                               {row.id}
                             </td>
                             <td
-                              className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
+                              className={`px-3 py-3 text-[15px] leading-snug whitespace-normal break-words [overflow-wrap:anywhere] @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] @[1280px]:leading-normal @[1280px]:whitespace-nowrap @[1280px]:break-normal ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
                             >
                               {row.fullName}
                             </td>
-                            <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.phone}</td>
-                            <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.lastVisit}</td>
-                            <td className={`whitespace-nowrap px-4 py-3 tabular-nums ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.requestsCount}</td>
-                            <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.totalAmount}</td>
-                            <td className="px-4 py-3 text-center align-middle" onClick={(e) => e.stopPropagation()}>
+                            <td
+                              className={`px-3 py-3 text-[15px] leading-normal whitespace-normal break-all [overflow-wrap:anywhere] @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] @[1280px]:whitespace-nowrap @[1280px]:break-normal ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                            >
+                              {row.phone}
+                            </td>
+                            <td
+                              className={`px-3 py-3 text-[15px] leading-normal @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] @[1280px]:whitespace-nowrap ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                            >
+                              {row.lastVisit}
+                            </td>
+                            <td
+                              className={`px-3 py-3 text-[15px] tabular-nums @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] @[1280px]:whitespace-nowrap ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                            >
+                              {row.requestsCount}
+                            </td>
+                            <td
+                              className={`px-3 py-3 text-[15px] leading-normal @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] @[1280px]:whitespace-nowrap ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                            >
+                              {row.totalAmount}
+                            </td>
+                            <td className="px-3 py-3 text-center align-middle @[1280px]:px-4" onClick={(e) => e.stopPropagation()}>
                               <button
                                 type="button"
                                 aria-label={`Меню действий, клиент ${row.id}`}
@@ -931,17 +979,16 @@ export function ClientsPage() {
                     </tbody>
                   </table>
                 </div>
-                <div className="px-4 pb-1 pt-2">
-                  <div className={`h-1 rounded-full ${isDarkTheme ? "bg-[#242D3F]" : "bg-[#EEEDF0]"}`} />
-                </div>
               </div>
 
-              <div className="relative flex items-center justify-between">
-                <div className={`rounded-[8px] px-2 py-1 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}>
+              <div className="relative flex flex-col gap-4 max-lg:gap-5 max-lg:pt-1 lg:flex-row lg:items-center lg:justify-between lg:gap-0 lg:pt-0">
+                <div
+                  className={`rounded-[8px] px-2 py-1 text-center text-[18px] font-bold tracking-[-0.04em] max-lg:w-full lg:w-auto lg:text-left lg:text-[20px] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
+                >
                   {sortedRows.length} клиентов
                 </div>
-                <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                  <div className="pointer-events-auto flex items-center gap-2">
+                <div className="pointer-events-none absolute left-1/2 top-1/2 z-[1] -translate-x-1/2 -translate-y-1/2 max-lg:relative max-lg:left-auto max-lg:top-auto max-lg:z-0 max-lg:translate-x-0 max-lg:translate-y-0 max-lg:pointer-events-auto max-lg:flex max-lg:w-full max-lg:justify-center lg:pointer-events-none lg:absolute lg:left-1/2 lg:top-1/2 lg:flex lg:w-auto lg:-translate-x-1/2 lg:-translate-y-1/2">
+                  <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
@@ -986,7 +1033,9 @@ export function ClientsPage() {
                     </button>
                   </div>
                 </div>
-                <div className={`flex items-center gap-2 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
+                <div
+                  className={`flex w-full shrink-0 justify-center gap-2 text-center text-[16px] font-bold tracking-[-0.04em] max-lg:order-last lg:w-auto lg:justify-end lg:text-right lg:text-[20px] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
+                >
                   <span>
                     {sortedRows.length === 0 ? `0 из ${totalClients}` : `${pageStart + 1} — ${pageEnd} из ${sortedRows.length}`}
                   </span>
@@ -1023,7 +1072,6 @@ export function ClientsPage() {
                     {([
                       { id: "open", label: "Открыть карточку клиента" },
                       { id: "call", label: "Позвонить" },
-                      { id: "notify", label: "Отправить уведомление" },
                       { id: "createBooking", label: "Создать запись" },
                       { id: "createWorkOrder", label: "Создать заказ-наряд" },
                     ] as { id: ClientActionId; label: string }[]).map((action) => (

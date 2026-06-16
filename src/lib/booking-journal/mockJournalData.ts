@@ -278,4 +278,10 @@ export const MOCK_JOURNAL_CLIENTS: Client[] = [
     phone: "+7 (999) 505-66-77",
     cars: [{ id: "jc13c1", model: "Volkswagen Polo", plate: "A517BC197" }],
   },
+  {
+    id: "16",
+    name: "Капров Александр Николаевич",
+    phone: "+7 (917) 113-54-73",
+    cars: [{ id: "16c1", model: "BMW M5", plate: "A21213X7" }],
+  },
 ];

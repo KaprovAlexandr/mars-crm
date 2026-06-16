@@ -43,6 +43,7 @@ export const clientsData: ClientRow[] = [
   { id: "10013", status: "Активный", fullName: "ООО «ЭкспрессТранс»", clientType: "Юр.лицо", phone: "+7 (925) 200-30-40", manager: "Власова Д.", managerPhoto: "https://i.pravatar.cc/80?img=49", lastVisit: "31.07.2025", carsCount: 5, requestsCount: 4, paymentForm: "Безнал", totalAmount: "16 700 ₽" },
   { id: "10014", status: "Ожидание", fullName: "Никитин Роман Павлович", clientType: "Физ.лицо", phone: "+7 (967) 555-66-77", manager: "Тимофеева А.", managerPhoto: "https://i.pravatar.cc/80?img=47", lastVisit: "24.07.2025", carsCount: 2, requestsCount: 3, paymentForm: "СБП", totalAmount: "14 250 ₽" },
   { id: "10015", status: "Активный", fullName: "Крылова Дарья Викторовна", clientType: "Физ.лицо", phone: "+7 (968) 888-99-10", manager: "Кириллов О.", managerPhoto: "https://i.pravatar.cc/80?img=14", lastVisit: "06.08.2025", carsCount: 1, requestsCount: 5, paymentForm: "Карта", totalAmount: "23 100 ₽" },
+  { id: "10016", status: "Активный", fullName: "Капров Александр Николаевич", clientType: "Физ.лицо", phone: "+7 (917) 113-54-73", manager: "Алексеев Д.", managerPhoto: "https://i.pravatar.cc/80?img=12", lastVisit: "15.06.2026", carsCount: 1, requestsCount: 6, paymentForm: "Карта", totalAmount: "1 143 174 ₽" },
 ];
 
 export const clientStatusColorMap: Record<ClientRow["status"], string> = {

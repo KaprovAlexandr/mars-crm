@@ -30,12 +30,13 @@ export function findClientsByNationalPhone(clients: readonly Client[], national1
   return clients.filter((c) => national10FromAnyPhoneString(c.phone) === d);
 }
 
-/** Поиск по фамилии (первое слово ФИО), подстрока без учёта регистра. */
+/** Поиск по фамилии (первое слово ФИО) или подстроке в полном ФИО, без учёта регистра. */
 export function findClientsBySurname(clients: readonly Client[], rawQuery: string): Client[] {
-  const q = rawQuery.trim().toLowerCase();
+  const q = rawQuery.trim().toLowerCase().replace(/ё/g, "е");
   if (!q) return [];
   return clients.filter((c) => {
-    const surname = surnameFromFullName(c.name).toLowerCase();
-    return surname.length > 0 && surname.includes(q);
+    const name = c.name.trim().toLowerCase().replace(/ё/g, "е");
+    const surname = surnameFromFullName(c.name).toLowerCase().replace(/ё/g, "е");
+    return (surname.length > 0 && surname.includes(q)) || name.includes(q);
   });
 }

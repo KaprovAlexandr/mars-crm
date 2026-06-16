@@ -14,7 +14,12 @@
     "migrate:work-orders": "node ./scripts/migrate-work-orders-to-supabase.mjs",
     "randomize:work-order-works": "node ./scripts/randomize-work-order-works.mjs",
     "randomize:work-order-parts": "node ./scripts/randomize-work-order-parts.mjs",
-    "sync:work-order-amounts": "node ./scripts/sync-work-order-amounts-from-state.mjs"
+    "sync:work-order-amounts": "node ./scripts/sync-work-order-amounts-from-state.mjs",
+    "sync:firebase-passwords": "node ./scripts/sync-firebase-user-passwords.mjs",
+    "seed:user-profiles": "node ./scripts/seed-user-profiles.mjs",
+    "seed:pending-access": "node ./scripts/seed-pending-access.mjs",
+    "seed:firebase-display-names": "node ./scripts/seed-firebase-display-names.mjs",
+    "seed:kaprov-client-stats": "node ./scripts/seed-kaprov-client-stats.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.105.3",
@@ -41,6 +46,7 @@
     "eslint": "^9",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.2",
+    "firebase-admin": "^14.0.0",
     "tailwindcss": "^4",
     "typescript": "^5",
     "typescript-eslint": "^8.59.0",

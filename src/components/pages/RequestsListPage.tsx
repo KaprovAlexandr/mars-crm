@@ -1,4 +1,3 @@
-﻿import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
 import {
   appendNewRequestFromSiteToFeed,
   appendRequestAssignedByLeadToFeed,
@@ -6,7 +5,9 @@ import {
 import { appendUserActionLog } from "@/lib/notifications/actionActivityLog";
 import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
 import { REQUEST_LIST_FLASH_ARMED_KEY } from "@/lib/notifications/inferNotificationDeepLink";
-import { CURRENT_USER_DISPLAY_NAME as KAPROV, CURRENT_USER_ROLE } from "@/lib/session/currentUser";
+import { CURRENT_USER_DISPLAY_NAME as KAPROV } from "@/lib/session/currentUser";
+import { useEmployeeRole } from "@/lib/auth/AuthRoleContext";
+import { canAssignRequestLeadRole } from "@/lib/auth/employeeRole";
 import {
   insertRequestStorageRow,
   isRequestsRemoteEnabled,
@@ -17,9 +18,9 @@ import {
 import type { ComponentType } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import * as XLSX from "xlsx";
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 import {
   RequestActionIconAssignLead,
   RequestActionIconEdit,
@@ -345,7 +346,9 @@ function formatRuDateToday(): string {
 
 export function RequestsListPage() {
   const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
+  const location = useLocation();
+  const { role } = useEmployeeRole();
+  const canAssignRequestLead = canAssignRequestLeadRole(role);
   const [searchParams, setSearchParams] = useSearchParams();
   const [flashRequestId, setFlashRequestId] = useState<string | null>(null);
   const [flashRequestPage, setFlashRequestPage] = useState<number | null>(null);
@@ -357,7 +360,16 @@ export function RequestsListPage() {
   const [mineOnly, setMineOnly] = useState(false);
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [archiveOnly, setArchiveOnly] = useState(false);
-  const [commentTooltip, setCommentTooltip] = useState<{ text: string; x: number; y: number; maxWidth: number } | null>(null);
+  const [commentTooltip, setCommentTooltip] = useState<{
+    text: string;
+    x: number;
+    y: number;
+    maxWidth: number;
+    /** Строка заявки, если плашка открыта тапом (закрытие по второму тапу / фону) */
+    forRequestId?: string;
+    /** Тап без hover — плашка кликабельна, фон закрывает */
+    pinned?: boolean;
+  } | null>(null);
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
   const filterBarRef = useRef<HTMLDivElement>(null);
   const [openFilter, setOpenFilter] = useState<FilterPanelId | null>(null);
@@ -403,6 +415,8 @@ export function RequestsListPage() {
 
   useEffect(() => {
     if (!isRequestsRemoteEnabled()) return;
+    const onRequestsPage = location.pathname === "/" || location.pathname.startsWith("/requests");
+    if (!onRequestsPage) return;
     let cancelled = false;
     async function loadRequestsFromSupabase() {
       try {
@@ -421,7 +435,7 @@ export function RequestsListPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [location.pathname]);
 
   useEffect(() => {
     function onPointerDown(e: PointerEvent) {
@@ -717,7 +731,7 @@ export function RequestsListPage() {
     ];
     if (row.manager === null) {
       list.push({ id: "takeWork", label: "Взять в работу", Icon: RequestActionIconGetJob });
-      if (!isManager) {
+      if (canAssignRequestLead) {
         list.push({
           id: "assignByLead",
           label: "Назначить ответственным (руководитель)",
@@ -733,7 +747,7 @@ export function RequestsListPage() {
         : { id: "delete", label: "Переместить в архив", Icon: RequestActionIconTrash, danger: true },
     );
     return list;
-  }, [requestActionsModal, rows, isManager, selectedRowIds, archiveOnly]);
+  }, [requestActionsModal, rows, canAssignRequestLead, selectedRowIds, archiveOnly]);
 
   async function handleRequestModalAction(actionId: RequestActionId) {
     if (!requestActionsModal) return;
@@ -751,7 +765,7 @@ export function RequestsListPage() {
       const row = rows.find((r) => r.id === id) ?? requestActionsModal;
       setRequestActionsModal(null);
       navigate(
-        `/journal?newBookingFromRequest=1&client=${encodeURIComponent(row.client)}&phone=${encodeURIComponent(row.phone)}&comment=${encodeURIComponent(row.comment)}`,
+        `/journal?newBookingFromRequest=1&requestId=${encodeURIComponent(row.id)}&client=${encodeURIComponent(row.client)}&phone=${encodeURIComponent(row.phone)}&comment=${encodeURIComponent(row.comment)}`,
       );
       return;
     }
@@ -1203,46 +1217,34 @@ export function RequestsListPage() {
   }
 
   return (
-    <div className={`h-screen w-screen overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
-      <div className="flex h-full w-full p-2">
-        <div className={`flex h-full w-full rounded-[16px] p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button onClick={() => navigate("/profile")} className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+    <div
+      className={`h-screen w-screen overflow-hidden max-lg:min-h-screen max-lg:h-auto max-lg:overflow-y-auto lg:h-screen lg:overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
+    >
+      <div className="flex h-full w-full min-h-0 p-2 max-lg:h-auto lg:h-full">
+        <div
+          className={`flex min-h-0 h-full w-full max-lg:h-auto max-lg:flex-col rounded-[16px] p-2 shadow-none lg:flex-row lg:shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
+        >
+          <MarsAppShellSidebar mobileLayout="requests" />
 
-          <main className="flex min-h-0 flex-1 flex-col">
-            <header className={`mb-2 rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}>
-              <div className="flex items-center gap-3">
-                <div className="flex items-baseline gap-2">
-                  <h1 className={`text-[36px] font-bold leading-[100%] tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>Заявки</h1>
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
+            <header
+              className={`mb-2 rounded-[16px] border px-4 py-4 lg:px-5 lg:py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
+            >
+              <div className="flex max-lg:flex-col max-lg:items-stretch max-lg:gap-4 items-center gap-3 lg:flex-row lg:items-center lg:gap-3">
+                <div className="flex min-w-0 items-baseline gap-2">
+                  <h1
+                    className={`text-[28px] font-bold leading-[100%] tracking-[-0.04em] lg:text-[36px] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}
+                  >
+                    Заявки
+                  </h1>
                   <span className={`text-[16px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#888888]"}`}>({TOTAL_REQUESTS_SHOWN})</span>
                 </div>
-                <div className="ml-auto flex items-center gap-1.5">
-                  <div className="relative">
+                <div className="ml-auto flex w-full min-w-0 max-lg:ml-0 max-lg:flex-col max-lg:gap-2 sm:max-lg:flex-row sm:max-lg:flex-wrap items-stretch sm:max-lg:items-center lg:ml-auto lg:w-auto lg:flex-row lg:items-center lg:gap-1.5">
+                  <div className="relative w-full min-w-0 sm:max-lg:min-w-[200px] sm:max-lg:flex-1 lg:w-auto">
                     <input
                       value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      className="h-12 w-[320px] rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden"
+                      className="h-12 w-full min-w-0 rounded-[10px] border-[3px] border-[#E4E5E7] bg-white px-3 pr-11 text-[18px] font-medium tracking-[-0.04em] text-black outline-none placeholder:text-[#B5B5B5] [color-scheme:light] [&::-webkit-search-cancel-button]:hidden lg:w-[320px]"
                       placeholder="Поиск по телефону или ФИО..."
                       aria-label="Поиск по телефону или ФИО..."
                     />
@@ -1269,14 +1271,14 @@ export function RequestsListPage() {
                         comment: "",
                       })
                     }
-                    className="h-12 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none"
                   >
                     Создать заявку
                   </button>
                   <button
                     type="button"
                     onClick={() => exportRequestsToXlsx(noActiveFilters ? rows : sortedRows)}
-                    className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out"
+                    className="h-12 min-h-[48px] shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-black px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out max-lg:flex-1 sm:max-lg:flex-none"
                   >
                     Экспорт в Excel
                   </button>
@@ -1284,7 +1286,9 @@ export function RequestsListPage() {
               </div>
             </header>
 
-            <section className={`flex min-h-0 flex-1 flex-col gap-5 rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}>
+            <section
+              className={`flex min-h-0 flex-1 flex-col gap-4 rounded-[16px] border px-4 py-4 max-lg:gap-4 lg:gap-5 lg:px-5 lg:py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
+            >
               <div className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-3">
                 <div ref={filterBarRef} className="flex min-w-0 flex-wrap items-center gap-[10px] gap-y-3">
                   {FILTER_KEYS.map(({ id, label }) => (
@@ -1449,15 +1453,17 @@ export function RequestsListPage() {
                 <button
                   type="button"
                   onClick={resetFilters}
-                  className="inline-flex shrink-0 cursor-pointer items-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border"
+                  className="inline-flex w-full shrink-0 cursor-pointer items-center justify-center rounded-[10px] border-2 border-[#EC1C24] bg-white px-[16px] py-[12px] text-[16px] font-medium leading-none tracking-[-0.04em] text-[#EC1C24] box-border sm:w-auto sm:justify-start lg:w-auto"
                 >
                   Сбросить фильтры
                 </button>
               </div>
 
-              <div className={`min-h-0 flex-1 overflow-hidden rounded-lg ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}>
-                <div className="h-full overflow-x-hidden overflow-y-hidden">
-                  <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
+              <div
+                className={`@container flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-lg max-lg:min-h-[240px] max-lg:flex-none lg:flex-1 ${isDarkTheme ? "bg-[#131925]" : "bg-white"}`}
+              >
+                <div className="journal-table-scroll relative min-h-0 min-w-0 flex-1 touch-pan-x touch-pan-y overflow-x-auto overflow-y-auto overscroll-x-contain [-webkit-overflow-scrolling:touch] max-lg:max-h-[min(72vh,680px)] lg:max-h-[min(78vh,800px)] xl:max-h-none @[1280px]:max-h-none @[1280px]:overflow-y-hidden">
+                  <table className="w-full min-w-[1420px] table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.015em] @[1280px]:min-w-0 @[1280px]:tracking-[-0.04em]">
                     <colgroup>
                       <col className="w-[5%]" />
                       <col className="w-[20%]" />
@@ -1469,9 +1475,11 @@ export function RequestsListPage() {
                       <col className="w-[10%]" />
                       <col className="w-[5%]" />
                     </colgroup>
-                    <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] whitespace-nowrap ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
+                    <thead
+                      className={`text-left text-[15px] font-medium leading-tight tracking-[-0.015em] whitespace-normal @[1280px]:text-[16px] @[1280px]:tracking-[-0.04em] @[1280px]:whitespace-nowrap ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}
+                    >
                       <tr>
-                        <th className="rounded-l-[5px] px-4 py-2.5 align-middle font-medium">
+                        <th className="rounded-l-[5px] px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
                           <span
                             className="inline-flex cursor-pointer select-none items-center"
                             role="checkbox"
@@ -1485,14 +1493,63 @@ export function RequestsListPage() {
                             <ClientsStyleCheckboxBox checked={allPageRowsSelected} dark={isDarkTheme} />
                           </span>
                         </th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">ФИО<button type="button" onClick={() => toggleSort("client")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Телефон<button type="button" onClick={() => toggleSort("phone")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Статус<button type="button" onClick={() => toggleSort("status")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Менеджер<button type="button" onClick={() => toggleSort("manager")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Источник<button type="button" onClick={() => toggleSort("source")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Комментарий<button type="button" onClick={() => toggleSort("comment")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Дата создания<button type="button" onClick={() => toggleSort("createdAt")} className="cursor-pointer"><SortIcon /></button></span></th>
-                        <th className="rounded-r-[5px] px-4 py-2.5 align-middle font-medium text-center">⋮</th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            ФИО
+                            <button type="button" onClick={() => toggleSort("client")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            Телефон
+                            <button type="button" onClick={() => toggleSort("phone")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            Статус
+                            <button type="button" onClick={() => toggleSort("status")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            Менеджер
+                            <button type="button" onClick={() => toggleSort("manager")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            Источник
+                            <button type="button" onClick={() => toggleSort("source")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            Комментарий
+                            <button type="button" onClick={() => toggleSort("comment")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="px-3 py-3 align-middle font-medium @[1280px]:px-4 @[1280px]:py-2.5">
+                          <span className="inline-flex items-center gap-2 font-medium">
+                            Дата создания
+                            <button type="button" onClick={() => toggleSort("createdAt")} className="cursor-pointer shrink-0">
+                              <SortIcon />
+                            </button>
+                          </span>
+                        </th>
+                        <th className="rounded-r-[5px] px-2 py-3 align-middle font-medium text-center @[1280px]:px-4 @[1280px]:py-2.5">⋮</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1514,15 +1571,15 @@ export function RequestsListPage() {
                         return (
                         <tr
                           key={row.id}
-                          className={`border-[5px] transition ${borderCls} ${bgCls} ${hoverCls} ${
+                          className={`border-[5px] transition ${borderCls} ${bgCls} ${hoverCls} [&_td]:align-middle ${
                             isArchiving ? "pointer-events-none animate-[archiveRowOut_260ms_ease_forwards]" : ""
                           } ${isFlashTarget ? "relative z-[2]" : ""}`}
                           style={flashStyle}
                           onAnimationEnd={(e) => onRequestFlashAnimationEnd(e, row.id)}
                         >
-                          <td className="px-4 py-3 align-middle" onClick={(e) => e.stopPropagation()}>
+                          <td className="px-3 py-3 @[1280px]:px-4" onClick={(e) => e.stopPropagation()}>
                             <span
-                              className="inline-flex cursor-pointer select-none items-center"
+                              className="inline-flex cursor-pointer select-none items-center justify-center"
                               role="checkbox"
                               aria-checked={isSelected}
                               aria-label={`Выбрать заявку ${row.id}`}
@@ -1534,16 +1591,26 @@ export function RequestsListPage() {
                               <ClientsStyleCheckboxBox checked={isSelected} dark={isDarkTheme} />
                             </span>
                           </td>
-                          <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>{row.client}</td>
-                          <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.phone}</td>
-                          <td className="whitespace-nowrap px-4 py-3 font-medium">
-                            <span className={`inline-flex items-center gap-2 font-medium ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
-                              <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: requestStatusColorMap[row.status] }} />
-                              <span className={`font-medium ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>{row.status}</span>
+                          <td
+                            className={`px-3 py-3 text-[15px] leading-snug whitespace-normal break-words [overflow-wrap:anywhere] @[1280px]:px-4 @[1280px]:text-[16px] @[1280px]:leading-normal @[1280px]:whitespace-nowrap @[1280px]:break-normal ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
+                          >
+                            {row.client}
+                          </td>
+                          <td
+                            className={`whitespace-normal break-all [overflow-wrap:anywhere] px-3 py-3 text-[15px] leading-normal @[1280px]:whitespace-nowrap @[1280px]:break-normal @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                          >
+                            {row.phone}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-3 font-medium @[1280px]:px-4">
+                            <span
+                              className={`inline-flex max-w-full items-center gap-2 font-medium @[1280px]:max-w-none ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
+                            >
+                              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: requestStatusColorMap[row.status] }} />
+                              <span className={`min-w-0 max-w-[12rem] truncate @[1280px]:max-w-none @[1280px]:whitespace-nowrap ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>{row.status}</span>
                             </span>
                           </td>
                           <td
-                            className={`whitespace-nowrap px-4 py-3 text-[16px] leading-normal ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                            className={`px-3 py-3 text-[15px] leading-normal @[1280px]:px-4 @[1280px]:text-[16px] ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
                           >
                             {row.manager ? (
                               <span className="inline-flex max-w-full items-center gap-1.5">
@@ -1551,42 +1618,72 @@ export function RequestsListPage() {
                                   <img
                                     src={row.managerPhoto}
                                     alt=""
-                                    className={`h-[1em] w-[1em] shrink-0 rounded-full object-cover ring-1 ${isDarkTheme ? "ring-white/15" : "ring-black/10"}`}
+                                    className={`h-[18px] w-[18px] shrink-0 rounded-full object-cover ring-1 ${isDarkTheme ? "ring-white/15" : "ring-black/10"}`}
                                   />
                                 ) : (
                                   <span
-                                    className={`grid h-[1em] w-[1em] shrink-0 place-items-center rounded-full text-[10px] font-medium leading-none ring-1 ring-inset ${
+                                    className={`grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[10px] font-medium leading-none ring-1 ring-inset ${
                                       isDarkTheme ? "bg-[#2B3345] text-[#9AA4BC] ring-white/10" : "bg-[#ECECEF] text-[#7D7D7D] ring-black/10"
                                     }`}
                                   >
                                     ?
                                   </span>
                                 )}
-                                <span className="min-w-0 truncate">{row.manager}</span>
+                                <span className="min-w-0 flex-1 truncate @[1280px]:flex-none @[1280px]:truncate">{row.manager}</span>
                               </span>
                             ) : (
-                              <span className={isDarkTheme ? "text-[#7C879F]" : "text-[#A0A0A0]"}>—</span>
+                              <span className={`inline-flex min-h-[18px] items-center ${isDarkTheme ? "text-[#7C879F]" : "text-[#A0A0A0]"}`}>—</span>
                             )}
                           </td>
-                          <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.source}</td>
-                          <td className={`max-w-0 min-w-0 px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>
-                            <span
-                              className="inline-block max-w-full cursor-default overflow-hidden text-ellipsis whitespace-nowrap align-top"
+                          <td
+                            className={`whitespace-nowrap px-3 py-3 text-[15px] @[1280px]:px-4 @[1280px]:text-[16px] ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                          >
+                            {row.source}
+                          </td>
+                          <td
+                            className={`max-w-none min-w-[12rem] px-3 py-3 @[1280px]:max-w-0 @[1280px]:min-w-0 @[1280px]:px-4 @[1280px]:py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                          >
+                            <button
+                              type="button"
+                              tabIndex={0}
+                              aria-label="Комментарий, нажмите чтобы показать полностью"
+                              aria-expanded={commentTooltip?.pinned === true && commentTooltip.forRequestId === row.id}
+                              className={`block w-full max-w-full truncate text-left text-[15px] leading-snug outline-none @[1280px]:text-[16px] @[1280px]:leading-normal ${
+                                isDarkTheme
+                                  ? "cursor-pointer text-[#D3DBEE] @[1280px]:cursor-default"
+                                  : "cursor-pointer text-black @[1280px]:cursor-default"
+                              }`}
                               onMouseEnter={(e) => {
                                 const p = clampCommentTooltipPos(e.clientX, e.clientY, row.comment);
-                                setCommentTooltip({ text: row.comment, x: p.x, y: p.y, maxWidth: p.maxWidth });
+                                setCommentTooltip({ text: row.comment, x: p.x, y: p.y, maxWidth: p.maxWidth, pinned: false });
                               }}
                               onMouseMove={(e) => {
                                 const p = clampCommentTooltipPos(e.clientX, e.clientY, row.comment);
-                                setCommentTooltip({ text: row.comment, x: p.x, y: p.y, maxWidth: p.maxWidth });
+                                setCommentTooltip({ text: row.comment, x: p.x, y: p.y, maxWidth: p.maxWidth, pinned: false });
                               }}
-                              onMouseLeave={() => setCommentTooltip(null)}
+                              onMouseLeave={() => setCommentTooltip((t) => (t?.pinned ? t : null))}
+                              onPointerUp={(e) => {
+                                e.stopPropagation();
+                                /* Мышью оставляем только hover-подсказку; палец/stylus — тап для закрепления */
+                                if (e.pointerType === "mouse") return;
+                                const p = clampCommentTooltipPos(e.clientX, e.clientY, row.comment);
+                                setCommentTooltip((prev) =>
+                                  prev?.pinned && prev.forRequestId === row.id
+                                    ? null
+                                    : { text: row.comment, x: p.x, y: p.y, maxWidth: p.maxWidth, pinned: true, forRequestId: row.id },
+                                );
+                              }}
+                              onClick={(e) => e.stopPropagation()}
                             >
                               {previewComment(row.comment)}
-                            </span>
+                            </button>
                           </td>
-                          <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.createdAt}</td>
-                          <td className="px-4 py-3 text-center align-middle" onClick={(e) => e.stopPropagation()}>
+                          <td
+                            className={`whitespace-nowrap px-3 py-3 text-[15px] @[1280px]:px-4 @[1280px]:py-3 @[1280px]:text-[16px] ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}
+                          >
+                            {row.createdAt}
+                          </td>
+                          <td className="px-2 py-3 text-center align-middle @[1280px]:px-4" onClick={(e) => e.stopPropagation()}>
                             <button
                               type="button"
                               aria-haspopup="dialog"
@@ -1609,17 +1706,16 @@ export function RequestsListPage() {
                     </tbody>
                   </table>
                 </div>
-                <div className="px-4 pb-1 pt-2">
-                  <div className={`h-1 rounded-full ${isDarkTheme ? "bg-[#242D3F]" : "bg-[#EEEDF0]"}`} />
-                </div>
               </div>
 
-              <div className="relative flex items-center justify-between">
-                <button className={`rounded-[8px] px-2 py-1 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}>
+              <div className="relative flex flex-col gap-4 max-lg:gap-5 max-lg:pt-1 lg:flex-row lg:items-center lg:justify-between lg:gap-0 lg:pt-0">
+                <button
+                  className={`rounded-[8px] px-2 py-1 text-center text-[18px] font-bold tracking-[-0.04em] max-lg:w-full lg:w-auto lg:text-left lg:text-[20px] ${isDarkTheme ? "bg-[#1A2232] text-[#EDF2FF]" : "bg-white text-black"}`}
+                >
                   {selectedRowIds.size} / заявок
                 </button>
-                <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                  <div className="pointer-events-auto flex items-center gap-2">
+                <div className="pointer-events-none absolute left-1/2 top-1/2 z-[1] -translate-x-1/2 -translate-y-1/2 max-lg:relative max-lg:left-auto max-lg:top-auto max-lg:z-0 max-lg:translate-x-0 max-lg:translate-y-0 max-lg:pointer-events-auto max-lg:flex max-lg:w-full max-lg:justify-center lg:pointer-events-none lg:absolute lg:left-1/2 lg:top-1/2 lg:flex lg:w-auto lg:-translate-x-1/2 lg:-translate-y-1/2">
+                  <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-2">
                     <button
                       type="button"
                       onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
@@ -1670,7 +1766,9 @@ export function RequestsListPage() {
                     </button>
                   </div>
                 </div>
-                <div className={`flex items-center gap-2 text-[20px] font-bold tracking-[-0.04em] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
+                <div
+                  className={`flex w-full shrink-0 justify-center gap-2 text-center text-[16px] font-bold tracking-[-0.04em] max-lg:order-last lg:w-auto lg:justify-end lg:text-right lg:text-[20px] ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}
+                >
                   <span>
                     {sortedRows.length === 0 ? `0 из ${TOTAL_REQUESTS_SHOWN}` : `${pageStart + 1} — ${pageEnd} из ${TOTAL_REQUESTS_SHOWN}`}
                   </span>
@@ -1682,15 +1780,26 @@ export function RequestsListPage() {
       </div>
       {commentTooltip && typeof document !== "undefined"
         ? createPortal(
-            <div
-              role="tooltip"
-              className={`pointer-events-none fixed z-[200] max-h-[min(280px,calc(100vh-16px))] w-max min-w-0 overflow-y-auto rounded-xl border px-3 py-2.5 text-left text-[14px] font-medium leading-relaxed whitespace-pre-wrap break-words shadow-[0_12px_40px_-8px_rgba(0,0,0,0.35)] ${
-                isDarkTheme ? "border-[#2B3345] bg-[#1B2331] text-[#EDF2FF]" : "border-[#E4E5E7] bg-white text-[#111826]"
-              }`}
-              style={{ left: commentTooltip.x, top: commentTooltip.y, maxWidth: commentTooltip.maxWidth }}
-            >
-              {commentTooltip.text}
-            </div>,
+            <>
+              {commentTooltip.pinned ? (
+                <button
+                  type="button"
+                  className="fixed inset-0 z-[190] cursor-default bg-transparent"
+                  aria-label="Закрыть подсказку"
+                  onClick={() => setCommentTooltip(null)}
+                />
+              ) : null}
+              <div
+                role="tooltip"
+                className={`fixed z-[200] max-h-[min(280px,calc(100vh-16px))] w-max min-w-0 overflow-y-auto rounded-xl border px-3 py-2.5 text-left text-[14px] font-medium leading-relaxed whitespace-pre-wrap break-words shadow-[0_12px_40px_-8px_rgba(0,0,0,0.35)] ${
+                  commentTooltip.pinned ? "pointer-events-auto" : "pointer-events-none"
+                } ${isDarkTheme ? "border-[#2B3345] bg-[#1B2331] text-[#EDF2FF]" : "border-[#E4E5E7] bg-white text-[#111826]"}`}
+                style={{ left: commentTooltip.x, top: commentTooltip.y, maxWidth: commentTooltip.maxWidth }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {commentTooltip.text}
+              </div>
+            </>,
             document.body,
           )
         : null}

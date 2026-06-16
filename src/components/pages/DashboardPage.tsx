@@ -1,7 +1,4 @@
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
-import { useNavigate } from "react-router-dom";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
 
 const statusCards = [
   { label: "Новые заявки", value: 12 },
@@ -39,36 +36,11 @@ const myRequests: ManagerRequestRow[] = [
 ];
 
 export function DashboardPage() {
-  const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
-
   return (
     <div className="h-screen w-screen overflow-hidden bg-black">
       <div className="flex h-full w-full p-2">
         <div className="flex h-full w-full rounded-[16px] bg-black p-2">
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white">Марс</button>
-            <button onClick={() => navigate("/")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="cube" /></button>
-            <button onClick={() => navigate("/journal")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="layers" /></button>
-            <button onClick={() => navigate("/work-orders")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="chat" /></button>
-            <button onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="pie" /></button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="grid" /></button> : null}
-              {!isManager ? <button className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="doc" /></button> : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5] hover:bg-white/10"
-                  title="Настройки"
-                  aria-label="Настройки"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button onClick={() => navigate("/profile")} className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"><MarsShellSidebarIcon type="user" /></button>
-            </div>
-          </aside>
+          <MarsAppShellSidebar />
 
           <main className="flex min-h-0 flex-1 flex-col">
             <header className="mb-2 rounded-[16px] border border-[#DDE1E7] bg-white px-5 py-5">

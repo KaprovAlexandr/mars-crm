@@ -1,12 +1,32 @@
-import { MarsShellSidebarIcon } from "@/components/icons/MarsShellSidebarIcon";
-import { NavRailNotifications } from "@/components/layout/NavRailNotifications";
-import { CURRENT_USER_ROLE } from "@/lib/session/currentUser";
+import { AddRoleDrawer } from "@/components/pages/AddRoleDrawer";
+import { clampCommentTooltipPos, previewComment } from "@/lib/ui/commentPreview";
+import { MarsAppShellSidebar } from "@/components/layout/MarsAppShellSidebar";
+import { ProfilePhotoFace } from "@/components/ui/ProfilePhotoFace";
+import { blockEmployeeEmail, isEmployeeBlocked } from "@/lib/auth/employeeBlockPersistence";
+import { resolveEmployeeEmailByFullName } from "@/lib/auth/employeeRole";
+import { useEmployeeRole } from "@/lib/auth/AuthRoleContext";
+import { mapEmployeeRoleLabelToRole, setEmployeeRoleOverride } from "@/lib/auth/employeeRoleOverrides";
+import { emitArchiveStyleToast } from "@/lib/notifications/inAppArchiveToastBus";
+import { loadSettingsEmployeeRows, persistSettingsEmployeeRows, buildEmployeeRowFromPending, upsertEmployeeRow } from "@/lib/settings/settingsEmployeePersistence";
+import { loadSettingsRoleRows, persistSettingsRoleRows } from "@/lib/settings/settingsRolePersistence";
+import {
+  loadPendingEmployees,
+  PENDING_EMPLOYEES_UPDATED_EVENT,
+  pendingEmployeeToTableRow,
+  removePendingEmployeeById,
+} from "@/lib/settings/pendingEmployeesPersistence";
+import {
+  fetchPendingEmployeesFromApi,
+  hydrateEmployeeRoleOverridesFromApi,
+  persistEmployeeRoleOverrideToApi,
+} from "@/lib/settings/pendingEmployeesApi";
+import type { RoleAccessPermissions } from "@/lib/settings/roleAccessSections";
+import { resolveRoleAccess } from "@/lib/settings/roleAccessSections";
 import * as XLSX from "xlsx";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { useNavigate } from "react-router-dom";
 
-type SettingsSectionId = "employees" | "roles" | "integrations";
+type SettingsSectionId = "employees" | "roles";
 
 /** Как на странице «Заявки» (`RequestsListPage`). */
 function ClientsStyleCheckboxBox({ checked, dark }: { checked: boolean; dark: boolean }) {
@@ -43,7 +63,6 @@ function SortIcon() {
 const SETTINGS_SECTIONS: { id: SettingsSectionId; label: string }[] = [
   { id: "employees", label: "Сотрудники" },
   { id: "roles", label: "Роли и доступ" },
-  { id: "integrations", label: "Интеграции" },
 ];
 
 /** Полоса переключения разделов в стиле чипов-фильтров страницы «Заявки» (без выпадающих фильтров). */
@@ -106,7 +125,7 @@ function SettingsFieldCard({
   );
 }
 
-type EmployeeStatus = "Активен" | "В отпуске" | "Заблокирован" | "Не в сети";
+type EmployeeStatus = "Активен" | "В отпуске" | "Заблокирован" | "Не в сети" | "Ожидание доступа";
 
 type EmployeeRow = {
   id: string;
@@ -115,11 +134,13 @@ type EmployeeRow = {
   role: string;
   status: EmployeeStatus;
   lastActivity: string;
+  email?: string;
+  pendingAccess?: boolean;
 };
 
 type EmployeeSortKey = "fullName" | "role" | "status" | "lastActivity";
 type SortDirection = "asc" | "desc";
-type EmployeeModalActionId = "openProfile" | "changeRole" | "changeStatus" | "resetPassword" | "logoutAllDevices" | "deleteEmployee";
+type EmployeeModalActionId = "openProfile" | "changeRole" | "block";
 
 type RoleRow = {
   id: string;
@@ -127,16 +148,27 @@ type RoleRow = {
   description: string;
   usersCount: number;
   createdOrUpdatedAt: string;
+  access?: RoleAccessPermissions;
 };
 
 type RoleSortKey = "roleName" | "description" | "usersCount" | "createdOrUpdatedAt";
-type RoleModalActionId = "viewAssignedEmployees" | "editRole" | "deleteRole";
+
+const EMPLOYEE_ROLE_OPTIONS = ["Руководитель", "Администратор", "Менеджер", "Мастер"] as const;
+type EmployeeRoleOption = (typeof EMPLOYEE_ROLE_OPTIONS)[number];
 
 const employeeStatusColorMap: Record<EmployeeStatus, string> = {
   Активен: "#00B515",
   "В отпуске": "#F39D00",
   Заблокирован: "#E00919",
   "Не в сети": "#ACACAC",
+  "Ожидание доступа": "#F39D00",
+};
+
+const employeeRoleColorMap: Record<EmployeeRoleOption, string> = {
+  Руководитель: "#7C3AED",
+  Администратор: "#2563EB",
+  Менеджер: "#F39D00",
+  Мастер: "#00B515",
 };
 
 const EMPLOYEE_ROWS: EmployeeRow[] = [
@@ -193,15 +225,6 @@ const ROLE_ROWS: RoleRow[] = [
   },
 ];
 
-function getInitials(fullName: string): string {
-  return fullName
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? "")
-    .join("");
-}
-
 function EmployeeAvatar({
   fullName,
   photo,
@@ -211,30 +234,13 @@ function EmployeeAvatar({
   photo: string;
   isDarkTheme: boolean;
 }) {
-  const [hasPhotoError, setHasPhotoError] = useState(false);
-  const initials = useMemo(() => getInitials(fullName), [fullName]);
-
-  if (hasPhotoError) {
-    return (
-      <span
-        className={`inline-flex h-[1em] w-[1em] shrink-0 items-center justify-center rounded-full text-[0.48em] font-semibold leading-none ${
-          isDarkTheme ? "bg-[#314055] text-[#E8EDF8]" : "bg-[#DDE4EE] text-[#3C4352]"
-        }`}
-        aria-hidden
-      >
-        {initials}
-      </span>
-    );
-  }
+  const photoSrc = photo.trim() || null;
 
   return (
-    <img
-      src={photo}
-      alt=""
+    <ProfilePhotoFace
+      photoSrc={photoSrc}
+      alt={fullName ? `Фото: ${fullName}` : "Фото профиля"}
       className={`h-[1em] w-[1em] shrink-0 rounded-full object-cover ring-1 ${isDarkTheme ? "ring-white/15" : "ring-black/10"}`}
-      onError={() => setHasPhotoError(true)}
-      loading="lazy"
-      decoding="async"
     />
   );
 }
@@ -249,16 +255,6 @@ function EmployeeModalIcon({ type, className }: { type: EmployeeModalActionId; c
       </svg>
     );
   }
-  if (type === "changeStatus") {
-    return (
-      <svg viewBox="0 0 24 28" fill="none" className={cls} aria-hidden>
-        <path d="M17.25 1.25L22.0577 6.13284L17.25 11.0157" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M6.05762 26.25L1.24992 21.3672L6.05762 16.4843" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M1.25 12.4219V8.35939C1.25 7.82066 1.44156 7.304 1.78253 6.92307C2.12351 6.54213 2.58597 6.32813 3.06818 6.32812H21.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        <path d="M22.25 15.4688V19.5313C22.25 20.07 22.0584 20.5867 21.7175 20.9676C21.3765 21.3485 20.914 21.5625 20.4318 21.5625H2.25" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    );
-  }
   if (type === "changeRole") {
     return (
       <svg viewBox="0 0 24 24" fill="none" className={cls} aria-hidden>
@@ -267,65 +263,16 @@ function EmployeeModalIcon({ type, className }: { type: EmployeeModalActionId; c
       </svg>
     );
   }
-  if (type === "resetPassword") {
+  if (type === "block") {
     return (
       <svg viewBox="0 0 24 24" fill="none" className={cls} aria-hidden>
-        <rect x="4" y="11" width="16" height="9" rx="2.2" stroke="currentColor" strokeWidth="2" />
-        <path d="M8 11V8.8C8 6.15 9.95 4 12 4C14.05 4 16 6.15 16 8.8V11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-        <circle cx="12" cy="15.5" r="1.2" fill="currentColor" />
+        <circle cx="12" cy="8" r="3.5" stroke="currentColor" strokeWidth="2" />
+        <path d="M5 20.25C5.5 16.9 8.1 15 12 15C15.9 15 18.5 16.9 19 20.25" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        <path d="M4 12H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
       </svg>
     );
   }
-  if (type === "logoutAllDevices") {
-    return (
-      <svg viewBox="0 0 24 24" fill="none" className={cls} aria-hidden>
-        <rect x="3.5" y="4.5" width="10" height="15" rx="1.8" stroke="currentColor" strokeWidth="2" />
-        <path d="M13 12H21M18 9L21 12L18 15" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 28 28" fill="none" className={cls} aria-hidden>
-      <path
-        d="M1.25 6.80556H26.25M10.625 12.3611V20.6944M16.875 12.3611V20.6944M2.8125 6.80556L4.375 23.4722C4.375 24.2089 4.70424 24.9155 5.29029 25.4364C5.87634 25.9573 6.6712 26.25 7.5 26.25H20C20.8288 26.25 21.6237 25.9573 22.2097 25.4364C22.7958 24.9155 23.125 24.2089 23.125 23.4722L24.6875 6.80556M9.0625 6.80556V2.63889C9.0625 2.27053 9.22712 1.91726 9.52015 1.6568C9.81317 1.39633 10.2106 1.25 10.625 1.25H16.875C17.2894 1.25 17.6868 1.39633 17.9799 1.6568C18.2729 1.91726 18.4375 2.27053 18.4375 2.63889V6.80556"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
-
-function RoleModalIcon({ type, className }: { type: RoleModalActionId; className?: string }) {
-  const cls = `h-[22px] w-[22px] shrink-0 ${className ?? ""}`;
-  if (type === "viewAssignedEmployees") {
-    return (
-      <svg viewBox="0 0 24 24" fill="none" className={cls} aria-hidden>
-        <circle cx="9" cy="8" r="3" stroke="currentColor" strokeWidth="2" />
-        <circle cx="16.5" cy="9.5" r="2.5" stroke="currentColor" strokeWidth="2" />
-        <path d="M4.5 19C4.9 16.2 6.9 14.5 9.9 14.5C12.9 14.5 14.9 16.2 15.3 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-      </svg>
-    );
-  }
-  if (type === "editRole") {
-    return (
-      <svg viewBox="0 0 25 25" fill="none" className={cls} aria-hidden>
-        <path d="M2.77778 22.2222H4.75694L18.3333 8.64583L16.3542 6.66667L2.77778 20.2431V22.2222ZM1.38889 25C0.99537 25 0.665741 24.8667 0.4 24.6C0.134259 24.3333 0.000925926 24.0037 0 23.6111V20.2431C0 19.8727 0.0694446 19.5194 0.208333 19.1833C0.347222 18.8472 0.543981 18.5523 0.798611 18.2986L18.3333 0.798611C18.6111 0.543981 18.9181 0.347222 19.2542 0.208333C19.5903 0.0694446 19.9431 0 20.3125 0C20.6819 0 21.0407 0.0694446 21.3889 0.208333C21.737 0.347222 22.038 0.555555 22.2917 0.833333L24.2014 2.77778C24.4792 3.03241 24.6815 3.33333 24.8083 3.68056C24.9352 4.02778 24.9991 4.375 25 4.72222C25 5.09259 24.9361 5.44583 24.8083 5.78194C24.6806 6.11806 24.4782 6.42454 24.2014 6.70139L6.70139 24.2014C6.44676 24.456 6.15139 24.6528 5.81528 24.7917C5.47917 24.9306 5.12639 25 4.75694 25H1.38889Z" fill="currentColor" />
-      </svg>
-    );
-  }
-  return (
-    <svg viewBox="0 0 28 28" fill="none" className={cls} aria-hidden>
-      <path
-        d="M1.25 6.80556H26.25M10.625 12.3611V20.6944M16.875 12.3611V20.6944M2.8125 6.80556L4.375 23.4722C4.375 24.2089 4.70424 24.9155 5.29029 25.4364C5.87634 25.9573 6.6712 26.25 7.5 26.25H20C20.8288 26.25 21.6237 25.9573 22.2097 25.4364C22.7958 24.9155 23.125 24.2089 23.125 23.4722L24.6875 6.80556M9.0625 6.80556V2.63889C9.0625 2.27053 9.22712 1.91726 9.52015 1.6568C9.81317 1.39633 10.2106 1.25 10.625 1.25H16.875C17.2894 1.25 17.6868 1.39633 17.9799 1.6568C18.2729 1.91726 18.4375 2.27053 18.4375 2.63889V6.80556"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
+  return null;
 }
 
 function settingsHeaderSubtitle(section: SettingsSectionId, employeeRowsCount: number): string {
@@ -334,8 +281,6 @@ function settingsHeaderSubtitle(section: SettingsSectionId, employeeRowsCount: n
       return `${employeeRowsCount} сотрудников`;
     case "roles":
       return "Роли и доступ";
-    case "integrations":
-      return "Интеграции";
     default:
       return "";
   }
@@ -346,13 +291,18 @@ function EmployeesSection({
   isDarkTheme,
   searchQuery,
   rows,
+  onEmployeeRoleChange,
+  onEmployeeStatusChange,
 }: {
   isDarkTheme: boolean;
   searchQuery: string;
   rows: EmployeeRow[];
+  onEmployeeRoleChange: (employeeId: string, role: string) => void;
+  onEmployeeStatusChange: (employeeId: string, status: EmployeeStatus) => void;
 }) {
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
   const [employeeActionsModal, setEmployeeActionsModal] = useState<EmployeeRow | null>(null);
+  const [rolePickerForId, setRolePickerForId] = useState<string | null>(null);
   const [employeeProfileModal, setEmployeeProfileModal] = useState<EmployeeRow | null>(null);
   const [employeeProfileSnapshot, setEmployeeProfileSnapshot] = useState<EmployeeRow | null>(null);
   const [employeeProfileMounted, setEmployeeProfileMounted] = useState(false);
@@ -452,13 +402,31 @@ function EmployeesSection({
     return () => window.removeEventListener("keydown", onKey);
   }, [employeeActionsModal]);
 
+  useEffect(() => {
+    if (!rolePickerForId) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setRolePickerForId(null);
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [rolePickerForId]);
+
+  useEffect(() => {
+    if (rolePickerForId && !rows.some((r) => r.id === rolePickerForId)) setRolePickerForId(null);
+  }, [rows, rolePickerForId]);
+
+  const rolePickerRow = rolePickerForId ? rows.find((r) => r.id === rolePickerForId) ?? null : null;
+
+  function commitEmployeeRole(role: EmployeeRoleOption) {
+    if (!rolePickerForId) return;
+    onEmployeeRoleChange(rolePickerForId, role);
+    setRolePickerForId(null);
+  }
+
   const employeeModalActions: { id: EmployeeModalActionId; label: string; danger?: boolean }[] = [
     { id: "openProfile", label: "Открыть профиль" },
     { id: "changeRole", label: "Изменить роль" },
-    { id: "changeStatus", label: "Изменить статус" },
-    { id: "resetPassword", label: "Сбросить пароль" },
-    { id: "logoutAllDevices", label: "Выйти со всех устройств" },
-    { id: "deleteEmployee", label: "Удалить сотрудника", danger: true },
+    { id: "block", label: "Заблокировать", danger: true },
   ];
   const employeeKpiCards = [
     { title: "Выручка сотрудника", value: "185 000 ₽ за месяц", note: "↑ +12 (+10%) за неделю" },
@@ -491,6 +459,24 @@ function EmployeesSection({
         setEmployeeOrdersSection("active");
         openProfileTimerRef.current = null;
       }, 140);
+      return;
+    }
+    if (actionId === "changeRole") {
+      const targetId = employeeActionsModal.id;
+      setEmployeeActionsModal(null);
+      setRolePickerForId(targetId);
+      return;
+    }
+    if (actionId === "block") {
+      const targetEmployee = employeeActionsModal;
+      onEmployeeStatusChange(targetEmployee.id, "Заблокирован");
+      const email = targetEmployee.email ?? resolveEmployeeEmailByFullName(targetEmployee.fullName);
+      if (email) blockEmployeeEmail(email);
+      emitArchiveStyleToast({
+        line1: targetEmployee.fullName,
+        line2: "заблокирован",
+      });
+      setEmployeeActionsModal(null);
       return;
     }
     setEmployeeActionsModal(null);
@@ -800,18 +786,14 @@ function EmployeesSection({
                 </div>
                 <ul className="p-0">
                   {employeeModalActions.map(({ id, label, danger }) => {
-                    const iconTone = danger
-                      ? "text-[#EC1C24]"
-                      : isDarkTheme
-                        ? "text-[#B8C4DC]"
-                        : "text-[#4B5563]";
+                    const iconTone = danger ? "text-[#EC1C24]" : isDarkTheme ? "text-[#B8C4DC]" : "text-[#4B5563]";
                     return (
                       <li key={id}>
                         <button
                           type="button"
                           className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
                             danger
-                              ? "text-[#EC1C24] hover:bg-[#EC1C24]/10"
+                              ? "text-[#EC1C24] hover:bg-[#FFF5F5]"
                               : isDarkTheme
                                 ? "text-[#E8EDF8] hover:bg-white/[0.06]"
                                 : "text-[#111826] hover:bg-[#F3F3F5]"
@@ -825,6 +807,75 @@ function EmployeesSection({
                     );
                   })}
                 </ul>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {rolePickerRow && typeof document !== "undefined"
+        ? createPortal(
+            <div
+              className="fixed inset-0 z-[265] flex items-center justify-center bg-black/45 p-4"
+              role="presentation"
+              onClick={() => setRolePickerForId(null)}
+            >
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="role-picker-title"
+                className={`w-full max-w-[360px] overflow-hidden rounded-[14px] border shadow-[0_24px_60px_-16px_rgba(0,0,0,0.45)] ${
+                  isDarkTheme ? "border-[#2B3345] bg-[#131925]" : "border-[#E4E5E7] bg-white"
+                }`}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className={`border-b p-5 ${isDarkTheme ? "border-[#2B3345]" : "border-[#EEEDF0]"}`}>
+                  <h2 id="role-picker-title" className={`text-[18px] font-semibold tracking-[-0.04em] ${isDarkTheme ? "text-[#F4F7FF]" : "text-[#111826]"}`}>
+                    Изменить роль
+                  </h2>
+                  <p className={`mt-1 truncate text-[14px] font-medium tracking-[-0.04em] ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#7D7D7D]"}`}>
+                    {rolePickerRow.fullName}
+                  </p>
+                </div>
+                <ul className="p-0">
+                  {EMPLOYEE_ROLE_OPTIONS.map((role) => {
+                    const isCurrent = rolePickerRow.role === role;
+                    return (
+                      <li key={role}>
+                        <button
+                          type="button"
+                          onClick={() => commitEmployeeRole(role)}
+                          className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                            isCurrent
+                              ? isDarkTheme
+                                ? "bg-white/[0.08] text-[#F4F7FF]"
+                                : "bg-[#F8F8FA] text-[#111826]"
+                              : isDarkTheme
+                                ? "text-[#E8EDF8] hover:bg-white/[0.06]"
+                                : "text-[#111826] hover:bg-[#F3F3F5]"
+                          }`}
+                        >
+                          <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: employeeRoleColorMap[role] }} />
+                          <span className="min-w-0 flex-1">{role}</span>
+                          {isCurrent ? (
+                            <span className={`shrink-0 text-[13px] font-medium ${isDarkTheme ? "text-[#9AA4BC]" : "text-[#7D7D7D]"}`}>Сейчас</span>
+                          ) : null}
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className={`border-t p-5 ${isDarkTheme ? "border-[#2B3345]" : "border-[#EEEDF0]"}`}>
+                  <button
+                    type="button"
+                    onClick={() => setRolePickerForId(null)}
+                    className={`w-full cursor-pointer rounded-[10px] p-4 text-center text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                      isDarkTheme ? "bg-[#202838] text-[#D3D9E8] hover:bg-[#2a3145]" : "bg-[#ECECEF] text-[#111111] hover:bg-[#E0E0E4]"
+                    }`}
+                  >
+                    Отмена
+                  </button>
+                </div>
               </div>
             </div>,
             document.body,
@@ -1079,17 +1130,49 @@ function EmployeesSection({
   );
 }
 
+const BUILT_IN_ROLE_IDS = new Set(["r1", "r2", "r3", "r4"]);
+
+type RoleModalActionId = "edit" | "delete";
+
+function RoleModalIcon({ type, className }: { type: RoleModalActionId; className?: string }) {
+  const cls = `h-[22px] w-[22px] shrink-0 ${className ?? ""}`;
+  if (type === "edit") {
+    return (
+      <svg viewBox="0 0 24 24" fill="none" className={cls} aria-hidden>
+        <path d="M4 20H20M14.5 5.5L18.5 9.5M14.5 5.5L8 12V16H12L18.5 9.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={cls} aria-hidden>
+      <path d="M4 7H20M9 7V5H15V7M7 7L8 19H16L17 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function RolesSection({
   isDarkTheme,
   searchQuery,
   rows,
+  onDeleteRole,
+  onEditRole,
 }: {
   isDarkTheme: boolean;
   searchQuery: string;
   rows: RoleRow[];
+  onDeleteRole: (roleId: string) => void;
+  onEditRole: (role: RoleRow) => void;
 }) {
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(() => new Set());
   const [roleActionsModal, setRoleActionsModal] = useState<RoleRow | null>(null);
+  const [descriptionTooltip, setDescriptionTooltip] = useState<{
+    text: string;
+    x: number;
+    y: number;
+    maxWidth: number;
+    forRoleId?: string;
+    pinned?: boolean;
+  } | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [sortState, setSortState] = useState<{ key: RoleSortKey; direction: SortDirection } | null>(null);
   const pageSize = 12;
@@ -1163,6 +1246,7 @@ function RolesSection({
       return next;
     });
   }, []);
+
   useEffect(() => {
     if (!roleActionsModal) return;
     function onKey(e: KeyboardEvent) {
@@ -1171,10 +1255,37 @@ function RolesSection({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [roleActionsModal]);
-  const roleModalActions: { id: RoleModalActionId; label: string; danger?: boolean }[] = [
-    { id: "viewAssignedEmployees", label: "Назначенные сотрудники" },
-    { id: "editRole", label: "Редактировать роль" },
-    { id: "deleteRole", label: "Удалить роль", danger: true },
+
+  function handleRoleModalAction(actionId: RoleModalActionId) {
+    if (!roleActionsModal) return;
+    if (actionId === "edit") {
+      onEditRole(roleActionsModal);
+      setRoleActionsModal(null);
+      return;
+    }
+    if (actionId === "delete") {
+      onDeleteRole(roleActionsModal.id);
+      setSelectedRowIds((prev) => {
+        const next = new Set(prev);
+        next.delete(roleActionsModal.id);
+        return next;
+      });
+      emitArchiveStyleToast({
+        line1: roleActionsModal.roleName,
+        line2: "роль удалена",
+      });
+      setRoleActionsModal(null);
+    }
+  }
+
+  const roleModalActions: { id: RoleModalActionId; label: string; danger?: boolean; hidden?: boolean }[] = [
+    { id: "edit", label: "Редактировать роль" },
+    {
+      id: "delete",
+      label: "Удалить роль",
+      danger: true,
+      hidden: roleActionsModal ? BUILT_IN_ROLE_IDS.has(roleActionsModal.id) : false,
+    },
   ];
 
   return (
@@ -1184,10 +1295,10 @@ function RolesSection({
           <table className="w-full table-fixed border-separate border-spacing-0 text-[16px] font-medium tracking-[-0.04em]">
             <colgroup>
               <col className="w-[5%]" />
-              <col className="w-[24%]" />
-              <col className="w-[33%]" />
-              <col className="w-[16%]" />
-              <col className="w-[18%]" />
+              <col className="w-[22%]" />
+              <col className="w-[22%]" />
+              <col className="w-[22%]" />
+              <col className="w-[22%]" />
               <col className="w-[4%]" />
             </colgroup>
             <thead className={`text-left text-[16px] font-medium tracking-[-0.04em] ${isDarkTheme ? "bg-[#1B2331] text-[#9AA4BC]" : "bg-[#F3F3F5] text-[#7D7D7D]"}`}>
@@ -1206,10 +1317,30 @@ function RolesSection({
                     <ClientsStyleCheckboxBox checked={allPageRowsSelected} dark={isDarkTheme} />
                   </span>
                 </th>
-                <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Роль<button type="button" onClick={() => toggleSort("roleName")} className="cursor-pointer"><SortIcon /></button></span></th>
-                <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Описание роли<button type="button" onClick={() => toggleSort("description")} className="cursor-pointer"><SortIcon /></button></span></th>
-                <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Количество пользователей<button type="button" onClick={() => toggleSort("usersCount")} className="cursor-pointer"><SortIcon /></button></span></th>
-                <th className="px-4 py-2.5 align-middle font-medium"><span className="inline-flex items-center gap-2 font-medium">Дата создания/изменение роли<button type="button" onClick={() => toggleSort("createdOrUpdatedAt")} className="cursor-pointer"><SortIcon /></button></span></th>
+                <th className="px-4 py-2.5 align-middle font-medium">
+                  <span className="inline-flex max-w-full items-center gap-2 overflow-hidden whitespace-nowrap font-medium">
+                    <span className="truncate">Роль</span>
+                    <button type="button" onClick={() => toggleSort("roleName")} className="shrink-0 cursor-pointer"><SortIcon /></button>
+                  </span>
+                </th>
+                <th className="px-4 py-2.5 align-middle font-medium">
+                  <span className="inline-flex max-w-full items-center gap-2 overflow-hidden whitespace-nowrap font-medium">
+                    <span className="truncate">Описание роли</span>
+                    <button type="button" onClick={() => toggleSort("description")} className="shrink-0 cursor-pointer"><SortIcon /></button>
+                  </span>
+                </th>
+                <th className="px-4 py-2.5 align-middle font-medium">
+                  <span className="inline-flex max-w-full items-center gap-2 overflow-hidden whitespace-nowrap font-medium">
+                    <span className="truncate">Количество пользователей</span>
+                    <button type="button" onClick={() => toggleSort("usersCount")} className="shrink-0 cursor-pointer"><SortIcon /></button>
+                  </span>
+                </th>
+                <th className="px-4 py-2.5 align-middle font-medium">
+                  <span className="inline-flex max-w-full items-center gap-2 overflow-hidden whitespace-nowrap font-medium">
+                    <span className="truncate" title="Дата создания/изменение роли">Дата создания/изменение роли</span>
+                    <button type="button" onClick={() => toggleSort("createdOrUpdatedAt")} className="shrink-0 cursor-pointer"><SortIcon /></button>
+                  </span>
+                </th>
                 <th className="rounded-r-[5px] px-4 py-2.5 align-middle font-medium text-center">⋮</th>
               </tr>
             </thead>
@@ -1235,18 +1366,54 @@ function RolesSection({
                         <ClientsStyleCheckboxBox checked={isSelected} dark={isDarkTheme} />
                       </span>
                     </td>
-                    <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>{row.roleName}</td>
-                    <td className={`px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>
-                      <span className="line-clamp-1">{row.description}</span>
+                    <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#EDF2FF]" : "text-black"}`}>
+                      <span className="block truncate" title={row.roleName}>{row.roleName}</span>
                     </td>
-                    <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.usersCount}</td>
-                    <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>{row.createdOrUpdatedAt}</td>
+                    <td className={`max-w-0 min-w-0 px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>
+                      <button
+                        type="button"
+                        tabIndex={0}
+                        aria-label="Описание роли, нажмите чтобы показать полностью"
+                        aria-expanded={descriptionTooltip?.pinned === true && descriptionTooltip.forRoleId === row.id}
+                        className={`block w-full max-w-full truncate text-left text-[16px] leading-normal outline-none ${
+                          isDarkTheme ? "cursor-pointer text-[#D3DBEE]" : "cursor-pointer text-black"
+                        }`}
+                        onMouseEnter={(e) => {
+                          const p = clampCommentTooltipPos(e.clientX, e.clientY, row.description);
+                          setDescriptionTooltip({ text: row.description, x: p.x, y: p.y, maxWidth: p.maxWidth, pinned: false });
+                        }}
+                        onMouseMove={(e) => {
+                          const p = clampCommentTooltipPos(e.clientX, e.clientY, row.description);
+                          setDescriptionTooltip({ text: row.description, x: p.x, y: p.y, maxWidth: p.maxWidth, pinned: false });
+                        }}
+                        onMouseLeave={() => setDescriptionTooltip((t) => (t?.pinned ? t : null))}
+                        onPointerUp={(e) => {
+                          e.stopPropagation();
+                          if (e.pointerType === "mouse") return;
+                          const p = clampCommentTooltipPos(e.clientX, e.clientY, row.description);
+                          setDescriptionTooltip((prev) =>
+                            prev?.pinned && prev.forRoleId === row.id
+                              ? null
+                              : { text: row.description, x: p.x, y: p.y, maxWidth: p.maxWidth, pinned: true, forRoleId: row.id },
+                          );
+                        }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {previewComment(row.description)}
+                      </button>
+                    </td>
+                    <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>
+                      <span className="block truncate">{row.usersCount}</span>
+                    </td>
+                    <td className={`whitespace-nowrap px-4 py-3 ${isDarkTheme ? "text-[#D3DBEE]" : "text-black"}`}>
+                      <span className="block truncate" title={row.createdOrUpdatedAt}>{row.createdOrUpdatedAt}</span>
+                    </td>
                     <td className="px-4 py-3 text-center align-middle" onClick={(e) => e.stopPropagation()}>
                       <button
                         type="button"
                         aria-haspopup="dialog"
                         aria-expanded={roleActionsModal?.id === row.id}
-                        aria-label={`Меню действий, роль ${row.roleName}`}
+                        aria-label={`Меню действий, ${row.roleName}`}
                         className={`cursor-pointer rounded-md px-1.5 py-0.5 text-[16px] font-bold leading-none tracking-[-0.04em] text-[#A0A0A0] transition-colors hover:text-[#EC1C24] ${
                           isDarkTheme ? "hover:bg-white/5" : "hover:bg-black/[0.04]"
                         }`}
@@ -1335,6 +1502,33 @@ function RolesSection({
         </div>
       </div>
 
+
+      {descriptionTooltip && typeof document !== "undefined"
+        ? createPortal(
+            <>
+              {descriptionTooltip.pinned ? (
+                <button
+                  type="button"
+                  className="fixed inset-0 z-[190] cursor-default bg-transparent"
+                  aria-label="Закрыть подсказку"
+                  onClick={() => setDescriptionTooltip(null)}
+                />
+              ) : null}
+              <div
+                role="tooltip"
+                className={`fixed z-[200] max-h-[min(280px,calc(100vh-16px))] w-max min-w-0 overflow-y-auto rounded-xl border px-3 py-2.5 text-left text-[14px] font-medium leading-relaxed whitespace-pre-wrap break-words shadow-[0_12px_40px_-8px_rgba(0,0,0,0.35)] ${
+                  descriptionTooltip.pinned ? "pointer-events-auto" : "pointer-events-none"
+                } ${isDarkTheme ? "border-[#2B3345] bg-[#1B2331] text-[#EDF2FF]" : "border-[#E4E5E7] bg-white text-[#111826]"}`}
+                style={{ left: descriptionTooltip.x, top: descriptionTooltip.y, maxWidth: descriptionTooltip.maxWidth }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {descriptionTooltip.text}
+              </div>
+            </>,
+            document.body,
+          )
+        : null}
+
       {roleActionsModal && typeof document !== "undefined"
         ? createPortal(
             <div
@@ -1360,30 +1554,29 @@ function RolesSection({
                   </p>
                 </div>
                 <ul className="p-0">
-                  {roleModalActions.map(({ id, label, danger }) => {
-                    const iconTone = danger
-                      ? "text-[#EC1C24]"
-                      : isDarkTheme
-                        ? "text-[#B8C4DC]"
-                        : "text-[#4B5563]";
-                    return (
-                      <li key={id}>
-                        <button
-                          type="button"
-                          className={`cursor-pointer flex w-full items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
-                            danger
-                              ? "text-[#EC1C24] hover:bg-[#EC1C24]/10"
-                              : isDarkTheme
-                                ? "text-[#E8EDF8] hover:bg-white/[0.06]"
-                                : "text-[#111826] hover:bg-[#F3F3F5]"
-                          }`}
-                        >
-                          <RoleModalIcon type={id} className={iconTone} />
-                          {label}
-                        </button>
-                      </li>
-                    );
-                  })}
+                  {roleModalActions
+                    .filter((action) => !action.hidden)
+                    .map(({ id, label, danger }) => {
+                      const iconTone = danger ? "text-[#EC1C24]" : isDarkTheme ? "text-[#B8C4DC]" : "text-[#4B5563]";
+                      return (
+                        <li key={id}>
+                          <button
+                            type="button"
+                            className={`flex w-full cursor-pointer items-center gap-3 p-5 text-left text-[16px] font-medium tracking-[-0.04em] transition-colors ${
+                              danger
+                                ? "text-[#EC1C24] hover:bg-[#FFF5F5]"
+                                : isDarkTheme
+                                  ? "text-[#E8EDF8] hover:bg-white/[0.06]"
+                                  : "text-[#111826] hover:bg-[#F3F3F5]"
+                            }`}
+                            onClick={() => handleRoleModalAction(id)}
+                          >
+                            <RoleModalIcon type={id} className={iconTone} />
+                            {label}
+                          </button>
+                        </li>
+                      );
+                    })}
                 </ul>
               </div>
             </div>,
@@ -1394,135 +1587,82 @@ function RolesSection({
   );
 }
 
-function IntegrationsPanel({ isDarkTheme }: { isDarkTheme: boolean }) {
-  const items = [
-    {
-      name: "Телефония",
-      status: "Подключено",
-      description: "Получайте уведомления о новых заявках, изменениях статусов и сообщениях от клиентов.",
-      actions: ["Настроить", "Отключить"],
-    },
-    {
-      name: "СМС-рассылки",
-      status: "Требует настройки",
-      description: "Автоматическая отправка SMS клиентам по статусам заявок и событиям.",
-      actions: ["Настроить", "Проверить соединение"],
-    },
-    {
-      name: "WhatsApp",
-      status: "Требует настройки",
-      description: "Отправка уведомлений клиентам напрямую в WhatsApp по статусам заявки.",
-      actions: ["Настроить", "Проверить соединение"],
-    },
-    {
-      name: "Webhook / Форма сайта",
-      status: "Подключено",
-      description: "Двусторонняя синхронизация заявок и лидов с сайтом компании.",
-      actions: ["Настроить", "Отключить"],
-    },
-    {
-      name: "Email",
-      status: "Не подключено",
-      description: "Отправка массовых email-уведомлений клиентам о новых услугах, акциях или изменениях.",
-      actions: ["Подключить"],
-    },
-    {
-      name: "Telegram",
-      status: "Не подключено",
-      description: "Уведомления и служебные оповещения в Telegram для менеджеров и руководителей.",
-      actions: ["Подключить"],
-    },
-  ] as const;
-
-  const statusTone = (status: string): string => {
-    if (status === "Подключено") return "bg-[#DFF2E4] text-[#2E8B57]";
-    if (status === "Требует настройки") return "bg-[#FCEBC8] text-[#A46C10]";
-    return "bg-[#F9DDE1] text-[#C13B4C]";
-  };
-
-  return (
-    <div className="min-h-0 flex-1">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {items.map((item) => {
-          const isConnected = item.status === "Подключено";
-          return (
-          <div
-            key={item.name}
-            className={`rounded-[8px] px-4 py-3 ${
-              isDarkTheme ? "bg-[#1B2331]" : "bg-[#F3F3F5]"
-            }`}
-          >
-            <span className={`inline-flex rounded-[4px] px-2 py-0.5 text-[11px] font-medium ${statusTone(item.status)}`}>{item.status}</span>
-            <h3 className={`mt-2 text-[16px] font-semibold leading-[1.2] ${isDarkTheme ? "text-[#EDF2FF]" : "text-[#2A2A2A]"}`}>{item.name}</h3>
-            <p className={`mt-1 min-h-[54px] text-[12px] leading-[1.25] ${isDarkTheme ? "text-[#AEB8CC]" : "text-[#767676]"}`}>{item.description}</p>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {item.actions.map((actionLabel) => {
-                const isPrimary = actionLabel === "Подключить";
-                const isSetup = actionLabel === "Настроить";
-                return (
-                  <button
-                    key={`${item.name}-${actionLabel}`}
-                    type="button"
-                    className={`px-3 py-1 text-[12px] font-medium ${
-                      isSetup
-                        ? "rounded-[10px] bg-[#EC1C24] text-white hover:bg-[#d91922]"
-                        : isPrimary
-                        ? "bg-[#F2BE59] text-[#2A2A2A] hover:bg-[#E9B24C]"
-                        : isDarkTheme
-                          ? "rounded-[6px] text-[#C9D2E8] hover:text-white"
-                          : "rounded-[6px] text-[#535353] hover:text-black"
-                    }`}
-                  >
-                    {actionLabel}
-                  </button>
-                );
-              })}
-              {isConnected ? null : (
-                <span className={`text-[12px] ${isDarkTheme ? "text-[#8FA9D8]" : "text-[#4A8BCF]"}`}>○ Как подключить</span>
-              )}
-            </div>
-          </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 /** Оболочка как «Заявки»; разделы — как вкладки «Основное / …» в ClientDetailsPage2. */
 export function SettingsPage() {
-  const navigate = useNavigate();
-  const isManager = CURRENT_USER_ROLE === "manager";
+  const { firebaseUser, access } = useEmployeeRole();
   const [isDarkTheme, setIsDarkTheme] = useState(false);
   const [section, setSection] = useState<SettingsSectionId>("employees");
   const [employeeSearchQuery, setEmployeeSearchQuery] = useState("");
-  const [employeeRows, setEmployeeRows] = useState<EmployeeRow[]>(EMPLOYEE_ROWS);
-  const [roleRows, setRoleRows] = useState<RoleRow[]>(ROLE_ROWS);
+  const [employeeRows, setEmployeeRows] = useState<EmployeeRow[]>(() => loadSettingsEmployeeRows(EMPLOYEE_ROWS));
+  const [roleRows, setRoleRows] = useState<RoleRow[]>(() => loadSettingsRoleRows(ROLE_ROWS));
+  const [roleDrawerOpen, setRoleDrawerOpen] = useState(false);
+  const [editingRole, setEditingRole] = useState<RoleRow | null>(null);
+  const [pendingEmployees, setPendingEmployees] = useState(() => loadPendingEmployees());
+  const [awaitingResponseOnly, setAwaitingResponseOnly] = useState(false);
 
-  const handleAddEmployee = useCallback(() => {
-    const fullNameRaw = window.prompt("Введите ФИО нового сотрудника:");
-    if (fullNameRaw === null) return;
-    const fullName = fullNameRaw.trim();
-    if (!fullName) return;
+  const pendingEmployeeRows = useMemo(
+    () =>
+      pendingEmployees
+        .filter((pending) => !isEmployeeBlocked(pending.email))
+        .map((pending) => pendingEmployeeToTableRow(pending)),
+    [pendingEmployees],
+  );
+  const awaitingResponseCount = pendingEmployeeRows.length;
+  const employeesTableRows = awaitingResponseOnly ? pendingEmployeeRows : employeeRows;
 
-    const nextIndex = employeeRows.length + 1;
-    const now = new Date();
-    const two = (n: number) => String(n).padStart(2, "0");
-    const timestamp = `${two(now.getDate())}.${two(now.getMonth() + 1)}.${now.getFullYear()}, ${two(now.getHours())}:${two(now.getMinutes())}`;
-    const defaultAvatar = `https://i.pravatar.cc/80?img=${(nextIndex % 70) + 1}`;
+  useEffect(() => {
+    const refreshPendingEmployees = () => setPendingEmployees(loadPendingEmployees());
+    window.addEventListener(PENDING_EMPLOYEES_UPDATED_EVENT, refreshPendingEmployees);
+    window.addEventListener("focus", refreshPendingEmployees);
+    return () => {
+      window.removeEventListener(PENDING_EMPLOYEES_UPDATED_EVENT, refreshPendingEmployees);
+      window.removeEventListener("focus", refreshPendingEmployees);
+    };
+  }, []);
 
-    setEmployeeRows((prev) => [
-      ...prev,
-      {
-        id: `e${Date.now()}`,
-        fullName,
-        photo: defaultAvatar,
-        role: "Менеджер",
-        status: "Активен",
-        lastActivity: timestamp,
-      },
-    ]);
-  }, [employeeRows.length]);
+  useEffect(() => {
+    if (!firebaseUser || !access.settings) return;
+
+    let cancelled = false;
+
+    async function refreshPendingFromServer() {
+      try {
+        const idToken = await firebaseUser.getIdToken();
+        await hydrateEmployeeRoleOverridesFromApi(idToken);
+        const rows = await fetchPendingEmployeesFromApi(idToken);
+        if (!cancelled) setPendingEmployees(rows);
+      } catch {
+        if (!cancelled) setPendingEmployees(loadPendingEmployees());
+      }
+    }
+
+    void refreshPendingFromServer();
+
+    function onFocus() {
+      void refreshPendingFromServer();
+    }
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [firebaseUser, access.settings]);
+
+  useEffect(() => {
+    persistSettingsEmployeeRows(employeeRows);
+  }, [employeeRows]);
+
+  useEffect(() => {
+    persistSettingsRoleRows(roleRows);
+  }, [roleRows]);
+
+  useEffect(() => {
+    for (const row of employeeRows) {
+      if (row.status !== "Заблокирован") continue;
+      const email = resolveEmployeeEmailByFullName(row.fullName);
+      if (email) blockEmployeeEmail(email);
+    }
+  }, [employeeRows]);
 
   const handleExportEmployees = useCallback(() => {
     const exportRows = employeeRows.map((row) => ({
@@ -1536,28 +1676,6 @@ export function SettingsPage() {
     XLSX.utils.book_append_sheet(workbook, worksheet, "Сотрудники");
     XLSX.writeFileXLSX(workbook, "сотрудники.xlsx");
   }, [employeeRows]);
-
-  const handleAddRole = useCallback(() => {
-    const roleNameRaw = window.prompt("Введите название роли:");
-    if (roleNameRaw === null) return;
-    const roleName = roleNameRaw.trim();
-    if (!roleName) return;
-    const descriptionRaw = window.prompt("Введите описание роли:") ?? "";
-    const description = descriptionRaw.trim() || "Описание не указано";
-    const now = new Date();
-    const two = (n: number) => String(n).padStart(2, "0");
-    const stamp = `${two(now.getDate())}.${two(now.getMonth() + 1)}.${now.getFullYear()}, ${two(now.getHours())}:${two(now.getMinutes())}`;
-    setRoleRows((prev) => [
-      ...prev,
-      {
-        id: `r${Date.now()}`,
-        roleName,
-        description,
-        usersCount: 0,
-        createdOrUpdatedAt: stamp,
-      },
-    ]);
-  }, []);
 
   const handleExportRoles = useCallback(() => {
     const exportRows = roleRows.map((row) => ({
@@ -1573,17 +1691,23 @@ export function SettingsPage() {
   }, [roleRows]);
 
   const currentSearchPlaceholder =
-    section === "roles" ? "Поиск роли..." : section === "employees" ? "Поиск сотрудника..." : "Поиск по настройкам...";
-  const primaryActionLabel =
-    section === "roles" ? "Добавить роль" : section === "employees" ? "Добавить сотрудника" : "Сохранить";
-  const handlePrimaryAction = () => {
-    if (section === "employees") handleAddEmployee();
-    else if (section === "roles") handleAddRole();
-  };
+    section === "roles" ? "Поиск роли..." : awaitingResponseOnly ? "Поиск сотрудника без доступа..." : "Поиск сотрудника...";
+  const filterToggleRowClass = "flex cursor-pointer items-center gap-2 text-[16px] font-medium tracking-[-0.04em]";
+  const filterToggleTitleClass = isDarkTheme ? "text-[#F4F7FF]" : "text-black";
+  const filterToggleCountClass = isDarkTheme ? "text-[#9AA4BC]" : "text-[#7D7D7D]";
   const handleExportAction = () => {
     if (section === "employees") handleExportEmployees();
     else if (section === "roles") handleExportRoles();
   };
+
+  const editingRoleInitialValues = useMemo(() => {
+    if (!editingRole) return null;
+    return {
+      roleName: editingRole.roleName,
+      description: editingRole.description,
+      access: resolveRoleAccess(editingRole),
+    };
+  }, [editingRole]);
 
   return (
     <div className={`h-screen w-screen overflow-hidden ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}>
@@ -1591,77 +1715,10 @@ export function SettingsPage() {
         <div
           className={`flex h-full w-full rounded-[16px] p-2 shadow-[0_16px_30px_-20px_rgba(0,0,0,0.95)] ${isDarkTheme ? "bg-[#0C0F14]" : "bg-black"}`}
         >
-          <aside className="mr-2 flex w-[100px] flex-col items-center rounded-[11px] bg-black">
-            <button
-              type="button"
-              className="mb-2 grid h-[90px] w-full place-items-center rounded-[16px] bg-[#EC1C24] text-[18px] font-semibold text-white"
-            >
-              Марс
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/")}
-              className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-            >
-              <MarsShellSidebarIcon type="cube" />
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/journal")}
-              className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-            >
-              <MarsShellSidebarIcon type="layers" />
-            </button>
-            <button
-              type="button"
-              onClick={() => navigate("/work-orders")}
-              className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-            >
-              <MarsShellSidebarIcon type="chat" />
-            </button>
-            <button type="button" onClick={() => navigate("/clients")} className="mb-2 grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]">
-              <MarsShellSidebarIcon type="pie" />
-            </button>
-            <div className="mt-auto space-y-2">
-              {!isManager ? (
-                <>
-                  <button
-                    type="button"
-                    className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-                  >
-                    <MarsShellSidebarIcon type="grid" />
-                  </button>
-                  <button
-                    type="button"
-                    className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-                  >
-                    <MarsShellSidebarIcon type="doc" />
-                  </button>
-                </>
-              ) : null}
-              <NavRailNotifications />
-              {!isManager ? (
-                <button
-                  type="button"
-                  className="grid h-12 w-12 place-items-center rounded-[10px] bg-white text-[#11131D]"
-                  title="Настройки"
-                  aria-label="Настройки"
-                  aria-current="page"
-                >
-                  <MarsShellSidebarIcon type="settings" />
-                </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={() => navigate("/profile")}
-                className="grid h-12 w-12 place-items-center rounded-[10px] text-[#8C93A5]"
-              >
-                <MarsShellSidebarIcon type="user" />
-              </button>
-            </div>
-          </aside>
+          <MarsAppShellSidebar mobileLayout="requests" />
 
-          <main className="flex min-h-0 flex-1 flex-col">
+
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col max-lg:overflow-x-hidden">
             <header
               className={`mb-2 rounded-[16px] border px-5 py-5 ${isDarkTheme ? "border-[#232937] bg-[#131925]" : "border-[#DDE1E7] bg-white"}`}
             >
@@ -1705,13 +1762,18 @@ export function SettingsPage() {
                       </button>
                     ) : null}
                   </div>
-                  <button
-                    type="button"
-                    onClick={handlePrimaryAction}
-                    className="h-12 rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-[#EC1C24] hover:bg-white hover:text-[#EC1C24]"
-                  >
-                    {primaryActionLabel}
-                  </button>
+                  {section === "roles" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEditingRole(null);
+                        setRoleDrawerOpen(true);
+                      }}
+                      className="h-12 shrink-0 cursor-pointer rounded-[10px] border-2 border-transparent bg-[#EC1C24] px-4 text-[18px] font-medium tracking-[-0.04em] text-white transition-colors duration-300 ease-in-out hover:border-[#EC1C24] hover:bg-white hover:text-[#EC1C24]"
+                    >
+                      Добавить роль
+                    </button>
+                  ) : null}
                   <button
                     type="button"
                     onClick={handleExportAction}
@@ -1728,22 +1790,138 @@ export function SettingsPage() {
               aria-label="Содержимое настроек"
             >
               <div className="flex w-full flex-wrap items-center justify-between gap-x-4 gap-y-3">
-                <SettingsSectionChipBar active={section} onChange={setSection} isDarkTheme={isDarkTheme} />
+                <div className="flex flex-wrap items-center gap-6">
+                  <SettingsSectionChipBar active={section} onChange={setSection} isDarkTheme={isDarkTheme} />
+                  {section === "employees" ? (
+                    <span
+                      className={`${filterToggleRowClass} shrink-0 cursor-pointer select-none`}
+                      onClick={() => setAwaitingResponseOnly((prev) => !prev)}
+                      role="checkbox"
+                      aria-checked={awaitingResponseOnly}
+                    >
+                      <ClientsStyleCheckboxBox checked={awaitingResponseOnly} dark={isDarkTheme} />
+                      <span className={filterToggleTitleClass}>Ожидают доступа </span>
+                      <span className={`tabular-nums ${filterToggleCountClass}`}>({awaitingResponseCount})</span>
+                    </span>
+                  ) : null}
+                </div>
               </div>
 
               {section === "employees" ? (
-                <EmployeesSection isDarkTheme={isDarkTheme} searchQuery={employeeSearchQuery} rows={employeeRows} />
-              ) : section === "roles" ? (
-                <RolesSection isDarkTheme={isDarkTheme} searchQuery={employeeSearchQuery} rows={roleRows} />
+                <EmployeesSection
+                  isDarkTheme={isDarkTheme}
+                  searchQuery={employeeSearchQuery}
+                  rows={employeesTableRows}
+                  onEmployeeRoleChange={(employeeId, role) => {
+                    const pending = pendingEmployees.find((item) => item.id === employeeId);
+                    if (pending) {
+                      const mappedRole = mapEmployeeRoleLabelToRole(role);
+                      if (!mappedRole) return;
+                      setEmployeeRoleOverride(pending.email, mappedRole);
+                      removePendingEmployeeById(employeeId);
+                      setPendingEmployees((prev) => prev.filter((item) => item.id !== employeeId));
+                      setEmployeeRows((prev) =>
+                        upsertEmployeeRow(prev, buildEmployeeRowFromPending(pending, role)),
+                      );
+                      void (async () => {
+                        if (!firebaseUser) return;
+                        try {
+                          const idToken = await firebaseUser.getIdToken();
+                          await persistEmployeeRoleOverrideToApi({
+                            idToken,
+                            email: pending.email,
+                            role: mappedRole,
+                          });
+                          const rows = await fetchPendingEmployeesFromApi(idToken);
+                          setPendingEmployees(rows);
+                        } catch {
+                          // локальное состояние уже обновлено
+                        }
+                      })();
+                      emitArchiveStyleToast({
+                        line1: pending.fullName,
+                        line2: `роль: ${role}`,
+                      });
+                      return;
+                    }
+                    setEmployeeRows((prev) => prev.map((r) => (r.id === employeeId ? { ...r, role } : r)));
+                  }}
+                  onEmployeeStatusChange={(employeeId, status) => {
+                    const pending = pendingEmployees.find((item) => item.id === employeeId);
+                    if (pending) {
+                      if (status === "Заблокирован") {
+                        blockEmployeeEmail(pending.email);
+                        removePendingEmployeeById(employeeId);
+                        setPendingEmployees((prev) => prev.filter((item) => item.id !== employeeId));
+                      }
+                      return;
+                    }
+                    setEmployeeRows((prev) => prev.map((r) => (r.id === employeeId ? { ...r, status } : r)));
+                  }}
+                />
               ) : (
-                <div key={section} className="hide-scrollbar min-h-0 flex-1 overflow-y-auto pr-1">
-                  {section === "integrations" && <IntegrationsPanel isDarkTheme={isDarkTheme} />}
-                </div>
+                <RolesSection
+                  isDarkTheme={isDarkTheme}
+                  searchQuery={employeeSearchQuery}
+                  rows={roleRows}
+                  onDeleteRole={(roleId) => setRoleRows((prev) => prev.filter((row) => row.id !== roleId))}
+                  onEditRole={(role) => {
+                    setEditingRole(role);
+                    setRoleDrawerOpen(true);
+                  }}
+                />
               )}
             </section>
           </main>
         </div>
       </div>
+
+      <AddRoleDrawer
+        open={roleDrawerOpen}
+        mode={editingRole ? "edit" : "add"}
+        initialValues={editingRoleInitialValues}
+        onOpenChange={(open) => {
+          setRoleDrawerOpen(open);
+          if (!open) setEditingRole(null);
+        }}
+        onSave={(payload) => {
+          if (editingRole) {
+            setRoleRows((prev) =>
+              prev.map((row) =>
+                row.id === editingRole.id
+                  ? {
+                      ...row,
+                      roleName: payload.roleName,
+                      description: payload.description,
+                      access: payload.access,
+                      createdOrUpdatedAt: payload.createdOrUpdatedAt,
+                    }
+                  : row,
+              ),
+            );
+            emitArchiveStyleToast({
+              line1: "Роль обновлена",
+              line2: payload.roleName,
+            });
+            return;
+          }
+          setRoleRows((prev) => [
+            {
+              id: `r-${Date.now()}`,
+              roleName: payload.roleName,
+              description: payload.description,
+              usersCount: 0,
+              createdOrUpdatedAt: payload.createdOrUpdatedAt,
+              access: payload.access,
+            },
+            ...prev,
+          ]);
+          emitArchiveStyleToast({
+            line1: "Роль добавлена",
+            line2: payload.roleName,
+          });
+        }}
+      />
     </div>
   );
 }

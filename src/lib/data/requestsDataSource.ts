@@ -103,3 +103,21 @@ export async function updateRequestsStorageRows(requestIds: string[], patch: Upd
   }
 }
 
+function todayIsoDate(): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/** После подтверждения записи из заявки — статус «В запись». */
+export async function markRequestAsBooked(requestId: string): Promise<void> {
+  const id = requestId.trim();
+  if (!id || !isRequestsRemoteEnabled()) return;
+  await updateRequestsStorageRows([id], {
+    status: "В запись",
+    last_activity_at: todayIsoDate(),
+  });
+}
+
